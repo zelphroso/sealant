@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <unistd.h>
 #include "../include/sealant.h"
 
 int cmd_migrate(int argc, char **argv);
@@ -109,23 +110,41 @@ static int cmd_list(void)
     fgets(line, sizeof(line), f);
 
     while (fgets(line, sizeof(line), f)) {
-        uint32_t id, floe, action;
-        uint64_t hits, bytes;
-        char     name[33];
+        if (strlen(line) < 10) continue;
 
-        if (sscanf(line, "%u %32s %u %u %lu %lu",
-                   &id, name, &floe, &action, &hits, &bytes) < 4)
+        char id_s[8], name_s[33], floe_s[8], action_s[8],
+             proto_s[8], iface_in_s[17], iface_out_s[17],
+             hits_s[12], bytes_s[12];
+
+        /* fixed width columns matching proc output */
+        if (sscanf(line, "%7s %32s %7s %7s %7s %16s %16s %11s %11s",
+                   id_s, name_s, floe_s, action_s, proto_s,
+                   iface_in_s, iface_out_s, hits_s, bytes_s) < 9)
             continue;
+
+        /* skip header */
+        if (strcmp(id_s, "ID") == 0) continue;
+        /* skip separator */
+        if (id_s[0] == '-' || id_s[0] == '─') continue;
 
         struct sealant_whisker w;
         memset(&w, 0, sizeof(w));
-        w.id         = id;
-        w.floe       = (uint8_t)floe;
-        w.action     = (uint8_t)action;
-        w.hit_count  = hits;
-        w.byte_count = bytes;
-        strncpy(w.name, strcmp(name, "(unnamed)") == 0 ? "" : name,
+        w.id       = (uint32_t)atoi(id_s);
+        w.floe     = (uint8_t)atoi(floe_s);
+        w.action   = (uint8_t)atoi(action_s);
+        w.protocol = (uint8_t)atoi(proto_s);
+        w.hit_count  = (uint64_t)atol(hits_s);
+        w.byte_count = (uint64_t)atol(bytes_s);
+
+        strncpy(w.name,
+                strcmp(name_s, "(unnamed)") == 0 ? "" : name_s,
                 SEALANT_NAME_LEN - 1);
+        strncpy(w.iface_in,
+                strcmp(iface_in_s, "-") == 0 ? "" : iface_in_s,
+                SEALANT_IFACE_LEN - 1);
+        strncpy(w.iface_out,
+                strcmp(iface_out_s, "-") == 0 ? "" : iface_out_s,
+                SEALANT_IFACE_LEN - 1);
 
         print_whisker_row(&w);
     }
@@ -242,6 +261,13 @@ int main(int argc, char **argv)
         usage();
         return 0;
     }
+    /* iptables compat aliases */
+    if (strcmp(argv[1], "-A") == 0)      argv[1] = "add";
+    else if (strcmp(argv[1], "-D") == 0) argv[1] = "del";
+    else if (strcmp(argv[1], "-L") == 0) argv[1] = "list";
+    else if (strcmp(argv[1], "-F") == 0) argv[1] = "flush";
+    else if (strcmp(argv[1], "-P") == 0) argv[1] = "policy";
+    else if (strcmp(argv[1], "-I") == 0) argv[1] = "add";
 
     if (strcmp(argv[1], "add") == 0)
         return cmd_add(argc - 2, argv + 2);
@@ -266,8 +292,13 @@ int main(int argc, char **argv)
     else if (strcmp(argv[1], "flush-log") == 0)
         return cmd_flush_log();
     else if (strcmp(argv[1], "watch") == 0) {
-        printf("sealant: watch coming in v1.1\n");
-        return 0;
+        execl("/usr/bin/python3", "python3",
+                "/usr/local/share/sealant/watch.py", NULL);
+            /* fallback path */
+        execl("/usr/bin/python3", "python3",
+                "/mnt/projects/sealant-1.0.0.25/userspace/watch.py", NULL);
+        fprintf(stderr, "sealant: python3 not found\n");
+        return 1;
     }
     else if (strcmp(argv[1], "migrate") == 0)
         return cmd_migrate(argc - 2, argv + 2);

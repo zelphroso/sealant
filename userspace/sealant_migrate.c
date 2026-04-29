@@ -544,6 +544,7 @@ static void process_stream(FILE *f)
 
             struct sealant_whisker w;
             if (parse_rule(line, &w)) {
+                snprintf(w.name, SEALANT_NAME_LEN, "migrated_%u", migrated_count);
                 migrated[migrated_count].w     = w;
                 migrated[migrated_count].valid = 1;
                 migrated_count++;

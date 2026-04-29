@@ -619,26 +619,30 @@ static struct miscdevice sealant_dev = {
 ───────────────────────────────────────── */
 static int sealant_proc_show(struct seq_file *m, void *v)
 {
-	uint32_t      i;
-	unsigned long flags;
+    uint32_t      i;
+    unsigned long flags;
 
-	seq_printf(m, "%-4s %-32s %-12s %-8s %-10s %-10s\n",
-		   "ID", "NAME", "FLOE", "ACTION", "HITS", "BYTES");
+    seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-10s %-10s\n",
+               "ID", "NAME", "FLOE", "ACTION", "PROTO",
+               "IFACE_IN", "IFACE_OUT", "HITS", "BYTES");
 
-	spin_lock_irqsave(&whisker_lock, flags);
-	for (i = 0; i < whisker_count; i++) {
-		struct sealant_whisker *w = &whisker_table[i];
-		seq_printf(m, "%-4u %-32s %-6u %-8u %-10llu %-10llu\n",
-            w->id,
-            w->name[0] ? w->name : "(unnamed)",
-            w->floe,
-            w->action,
-            w->hit_count,
-            w->byte_count);
-	}
-	spin_unlock_irqrestore(&whisker_lock, flags);
+    spin_lock_irqsave(&whisker_lock, flags);
+    for (i = 0; i < whisker_count; i++) {
+        struct sealant_whisker *w = &whisker_table[i];
+        seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-10llu %-10llu\n",
+                   w->id,
+                   w->name[0] ? w->name : "(unnamed)",
+                   w->floe,
+                   w->action,
+                   w->protocol,
+                   w->iface_in[0]  ? w->iface_in  : "-",
+                   w->iface_out[0] ? w->iface_out : "-",
+                   w->hit_count,
+                   w->byte_count);
+    }
+    spin_unlock_irqrestore(&whisker_lock, flags);
 
-	return 0;
+    return 0;
 }
 
 static int sealant_proc_open(struct inode *inode, struct file *file)

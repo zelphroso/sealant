@@ -10,6 +10,8 @@ $(TARGET): sealant.c sealant_migrate.c sealant_parse.c sealant_comm.c
 install: $(TARGET)
 	sudo ln -sf $(shell pwd)/$(TARGET) /usr/local/bin/sealant
 	sudo mkdir -p /etc/sealant
+	sudo mkdir -p /usr/local/share/sealant
+	sudo cp watch.py /usr/local/share/sealant/watch.py
 	@echo "sealant installed"
 
 uninstall:

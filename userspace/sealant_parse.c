@@ -392,6 +392,14 @@ void print_whisker_row(struct sealant_whisker *w)
     char src_buf[32]  = "-";
     char dst_buf[32]  = "-";
     char port_buf[32] = "-";
+    char iface_buf[34] = "-";
+
+    if (w->iface_in[0] && w->iface_out[0])
+        snprintf(iface_buf, sizeof(iface_buf), "%s/%s", w->iface_in, w->iface_out);
+    else if (w->iface_in[0])
+        snprintf(iface_buf, sizeof(iface_buf), "in:%s", w->iface_in);
+    else if (w->iface_out[0])
+        snprintf(iface_buf, sizeof(iface_buf), "out:%s", w->iface_out);
 
     /* build action string with iptables alias */
     snprintf(action_buf, sizeof(action_buf), "%s (%s)",
@@ -419,13 +427,15 @@ void print_whisker_row(struct sealant_whisker *w)
                      w->dst_port_min, w->dst_port_max);
     }
 
-    printf("%-4u %-24s %-12s %-20s %-8s %-16s %-16s %-8s %-10lu %-10lu\n",           w->id,
+    printf("%-4u %-24s %-12s %-20s %-8s %-16s %-16s %-16s %-8s %-10lu %-10lu\n",
+           w->id,
            w->name[0] ? w->name : "(unnamed)",
            floe_to_str(w->floe),
            action_buf,
            proto_to_str(w->protocol),
            src_buf,
            dst_buf,
+           iface_buf,
            port_buf,
            w->hit_count,
            w->byte_count);
@@ -433,12 +443,13 @@ void print_whisker_row(struct sealant_whisker *w)
 
 void print_whisker_header(void)
 {
-    printf("%-4s %-24s %-12s %-20s %-8s %-16s %-16s %-8s %-10s %-10s\n",
+    printf("%-4s %-24s %-12s %-20s %-8s %-16s %-16s %-16s %-8s %-10s %-10s\n",
            "ID", "NAME", "FLOE", "ACTION", "PROTO",
-           "SRC", "DST", "PORT", "HITS", "BYTES");
-    printf("%-4s %-24s %-12s %-20s %-8s %-16s %-16s %-8s %-10s %-10s\n",
+           "SRC", "DST", "IFACE", "PORT", "HITS", "BYTES");
+    printf("%-4s %-24s %-12s %-20s %-8s %-16s %-16s %-16s %-8s %-10s %-10s\n",
            "──", "────────────────────────", "────────────",
            "────────────────────", "────────",
            "────────────────", "────────────────",
-           "────────", "──────────", "──────────");
+           "────────────────", "────────",
+           "──────────", "──────────");
 }
