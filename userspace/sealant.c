@@ -1,0 +1,279 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include "../include/sealant.h"
+
+int cmd_migrate(int argc, char **argv);
+
+uint8_t     parse_action(const char *s);
+uint8_t     parse_floe(const char *s);
+uint8_t     parse_proto(const char *s);
+uint8_t     parse_pod(const char *s);
+uint32_t    parse_ip(const char *s);
+void        parse_cidr(const char *cidr, uint32_t *ip, uint32_t *mask);
+void        parse_port_range(const char *s, uint16_t *min, uint16_t *max);
+int         parse_whisker(int argc, char **argv, struct sealant_whisker *w);
+void        print_whisker_row(struct sealant_whisker *w);
+void        print_whisker_header(void);
+
+/* ─────────────────────────────────────────
+   DEVICE PATH
+───────────────────────────────────────── */
+
+#define SEALANT_DEV "/dev/sealant"
+
+/* ─────────────────────────────────────────
+   USAGE
+───────────────────────────────────────── */
+
+static void usage(void)
+{
+    printf("sealant v%s\n\n", SEALANT_VERSION);
+    printf("usage:\n");
+    printf("  sealant add     -f <floe> -p <proto> --dport <port> -j <action>\n");
+    printf("  sealant del     -i <id>\n");
+    printf("  sealant list\n");
+    printf("  sealant flush   -f <floe>\n");
+    printf("  sealant policy  -f <floe> -j <action>\n");
+    printf("  sealant reload\n");
+    printf("  sealant save\n");
+    printf("  sealant load\n");
+    printf("  sealant status\n");
+    printf("  sealant log\n");
+    printf("  sealant flush-log\n");
+    printf("  sealant migrate [--apply] [--ipv6] [--file <path>]\n");
+    printf("  sealant watch   (v1.1)\n");
+    printf("\nfloes:   INPUT, OUTPUT, FORWARD, PREROUTING, POSTROUTING\n");
+    printf("actions: HAUL (ACCEPT), DIVE (DROP), BARK (REJECT), BLEAT (LOG)\n");
+    printf("protos:  tcp, udp, icmp, icmpv6, any\n");
+}
+
+/* ─────────────────────────────────────────
+   SUBCOMMANDS
+───────────────────────────────────────── */
+
+/* sealant add */
+static int cmd_add(int argc, char **argv)
+{
+    struct sealant_whisker w;
+
+    if (parse_whisker(argc, argv, &w) != 0)
+        return 1;
+
+    if (sealant_comm_add(&w) < 0)
+        return 1;
+
+    printf("sealant: whisker added\n");
+    return 0;
+}
+
+/* sealant del */
+static int cmd_del(int argc, char **argv)
+{
+    uint32_t id = 0;
+    int      i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-i") == 0 && i+1 < argc)
+            id = (uint32_t)atoi(argv[++i]);
+    }
+
+    if (sealant_comm_del(id) < 0)
+        return 1;
+
+    printf("sealant: whisker %u deleted\n", id);
+    return 0;
+}
+
+static int cmd_list(void)
+{
+    FILE *f;
+    char  line[512];
+
+    f = fopen("/proc/sealant/observe", "r");
+    if (!f) {
+        fprintf(stderr, "sealant: cannot read /proc/sealant/observe\n");
+        fprintf(stderr, "sealant: is the kernel module loaded?\n");
+        return 1;
+    }
+
+    print_whisker_header();
+
+    /* skip kernel proc header */
+    fgets(line, sizeof(line), f);
+
+    while (fgets(line, sizeof(line), f)) {
+        uint32_t id, floe, action;
+        uint64_t hits, bytes;
+        char     name[33];
+
+        if (sscanf(line, "%u %32s %u %u %lu %lu",
+                   &id, name, &floe, &action, &hits, &bytes) < 4)
+            continue;
+
+        struct sealant_whisker w;
+        memset(&w, 0, sizeof(w));
+        w.id         = id;
+        w.floe       = (uint8_t)floe;
+        w.action     = (uint8_t)action;
+        w.hit_count  = hits;
+        w.byte_count = bytes;
+        strncpy(w.name, strcmp(name, "(unnamed)") == 0 ? "" : name,
+                SEALANT_NAME_LEN - 1);
+
+        print_whisker_row(&w);
+    }
+
+    fclose(f);
+    return 0;
+}
+
+/* sealant flush */
+static int cmd_flush(int argc, char **argv)
+{
+    uint8_t floe = FLOE_INPUT;
+    int     i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0 && i+1 < argc)
+            floe = parse_floe(argv[++i]);
+    }
+
+    if (sealant_comm_flush(floe) < 0)
+        return 1;
+
+    printf("sealant: floe flushed\n");
+    return 0;
+}
+
+/* sealant policy */
+static int cmd_policy(int argc, char **argv)
+{
+    uint8_t floe   = FLOE_INPUT;
+    uint8_t action = ACTION_HAUL;
+    int     i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0 && i+1 < argc)
+            floe = parse_floe(argv[++i]);
+        else if (strcmp(argv[i], "-j") == 0 && i+1 < argc)
+            action = parse_action(argv[++i]);
+    }
+
+    if (sealant_comm_set_policy(floe, action) < 0)
+        return 1;
+
+    printf("sealant: policy set\n");
+    return 0;
+}
+
+/* sealant reload */
+static int cmd_reload(void)
+{
+    if (sealant_comm_reload() < 0)
+        return 1;
+
+    printf("sealant: hot reload triggered\n");
+    return 0;
+}
+
+static int cmd_save(void)
+{
+    return sealant_comm_save();
+}
+
+static int cmd_load(void)
+{
+    return sealant_comm_load();
+}
+
+static int cmd_flush_log(void)
+{
+    return sealant_comm_flush_log();
+}
+
+static int cmd_status(void)
+{
+    struct sealant_stats s;
+
+    if (sealant_comm_get_stats(&s) < 0)
+        return 1;
+
+    printf("sealant v%s\n\n", s.version);
+    printf("  whiskers  : %u\n", s.whisker_count);
+    printf("  pups      : %u\n", s.pup_count);
+    printf("  log       : %u entries\n", s.log_entries);
+    if (s.log_dropped > 0)
+        printf("  dropped   : %u log entries\n", s.log_dropped);
+    return 0;
+}
+
+static int cmd_log(void)
+{
+    FILE *f;
+    char  line[512];
+
+    f = fopen("/proc/sealant/log", "r");
+    if (!f) {
+        fprintf(stderr, "sealant: cannot read /proc/sealant/log\n");
+        fprintf(stderr, "sealant: is the kernel module loaded?\n");
+        return 1;
+    }
+
+    while (fgets(line, sizeof(line), f))
+        printf("%s", line);
+
+    fclose(f);
+    return 0;
+}
+
+/* ─────────────────────────────────────────
+   MAIN — subcommand dispatch
+───────────────────────────────────────── */
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        usage();
+        return 0;
+    }
+
+    if (strcmp(argv[1], "add") == 0)
+        return cmd_add(argc - 2, argv + 2);
+    else if (strcmp(argv[1], "del") == 0)
+        return cmd_del(argc - 2, argv + 2);
+    else if (strcmp(argv[1], "list") == 0)
+        return cmd_list();
+    else if (strcmp(argv[1], "flush") == 0)
+        return cmd_flush(argc - 2, argv + 2);
+    else if (strcmp(argv[1], "policy") == 0)
+        return cmd_policy(argc - 2, argv + 2);
+    else if (strcmp(argv[1], "reload") == 0)
+        return cmd_reload();
+    else if (strcmp(argv[1], "save") == 0)
+        return cmd_save();
+    else if (strcmp(argv[1], "load") == 0)
+        return cmd_load();
+    else if (strcmp(argv[1], "status") == 0)
+        return cmd_status();
+    else if (strcmp(argv[1], "log") == 0)
+        return cmd_log();
+    else if (strcmp(argv[1], "flush-log") == 0)
+        return cmd_flush_log();
+    else if (strcmp(argv[1], "watch") == 0) {
+        printf("sealant: watch coming in v1.1\n");
+        return 0;
+    }
+    else if (strcmp(argv[1], "migrate") == 0)
+        return cmd_migrate(argc - 2, argv + 2);
+    else {
+        fprintf(stderr, "sealant: unknown command '%s'\n", argv[1]);
+        usage();
+        return 1;
+    }
+}
