@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import curses
-import time
 import os
 import sys
 
@@ -10,7 +9,7 @@ import sys
 # ─────────────────────────────────────────
 OBSERVE_PATH = "/proc/sealant/observe"
 LOG_PATH     = "/proc/sealant/log"
-REFRESH_MS   = 1000  # refresh every second
+REFRESH_MS   = 1000
 
 VERSION = "1.0.0.25"
 
@@ -22,19 +21,24 @@ def read_observe():
     try:
         with open(OBSERVE_PATH, "r") as f:
             lines = f.readlines()
-        for line in lines[1:]:  # skip header
+        for line in lines[1:]:
             parts = line.split()
-            if len(parts) < 7:
+            if len(parts) < 12:
                 continue
             try:
                 rule = {
-                    "id":       int(parts[0]),
-                    "name":     parts[1],
-                    "floe":     int(parts[2]),
-                    "action":   int(parts[3]),
-                    "protocol": int(parts[4]),
-                    "hits":     int(parts[5]),
-                    "bytes":    int(parts[6]),
+                    "id":        int(parts[0]),
+                    "name":      parts[1],
+                    "floe":      int(parts[2]),
+                    "action":    int(parts[3]),
+                    "protocol":  int(parts[4]),
+                    "iface_in":  parts[5] if parts[5] != "-" else "",
+                    "iface_out": parts[6] if parts[6] != "-" else "",
+                    "dport_min": int(parts[7]),
+                    "dport_max": int(parts[8]),
+                    "hits":      int(parts[9]),
+                    "bytes":     int(parts[10]),
+                    "ipv6":      int(parts[11]),
                 }
                 rules.append(rule)
             except ValueError:
@@ -48,7 +52,7 @@ def read_log():
     try:
         with open(LOG_PATH, "r") as f:
             lines = f.readlines()
-        for line in lines[1:]:  # skip header
+        for line in lines[1:]:
             parts = line.split()
             if len(parts) < 9:
                 continue
@@ -69,7 +73,7 @@ def read_log():
                 continue
     except (FileNotFoundError, PermissionError):
         pass
-    return entries[-50:]  # last 50 entries
+    return entries[-50:]
 
 # ─────────────────────────────────────────
 # TRANSLATION
@@ -177,7 +181,7 @@ def safe_addstr(win, y, x, text, attr=0):
     except curses.error:
         pass
 
-def draw_title(win, tab):
+def draw_title(win, tab, show_ipv6=False):
     max_y, max_x = win.getmaxyx()
     title = f" sealant watch v{VERSION} "
     safe_addstr(win, 0, 0, title, curses.color_pair(COLOR_TITLE) | curses.A_BOLD)
@@ -193,7 +197,8 @@ def draw_title(win, tab):
                         curses.color_pair(COLOR_DIM))
         tab_x += len(label) + 1
 
-    help_str = " [1]Rules [2]Log [3]Status [q]Quit "
+    ipv6_state = "ON" if show_ipv6 else "OFF"
+    help_str = f" [1]Rules [2]Log [3]Status [6]IPv6:{ipv6_state} [q]Quit "
     safe_addstr(win, 0, max_x - len(help_str) - 1, help_str,
                 curses.color_pair(COLOR_DIM))
 
@@ -207,42 +212,59 @@ def draw_separator(win, y):
 # ─────────────────────────────────────────
 # RULES TAB
 # ─────────────────────────────────────────
-def draw_rules(win, rules, scroll):
+def draw_rules(win, rules, scroll, show_ipv6=False):
     max_y, max_x = win.getmaxyx()
 
-    # column header
-    header = f"{'ID':<4} {'NAME':<24} {'FLOE':<12} {'ACTION':<20} {'PROTO':<8} {'HITS':<10} {'BYTES':<10}"
+    header = f"{'ID':<4} {'NAME':<24} {'FLOE':<12} {'ACTION':<20} {'PROTO':<8} {'IFACE':<16} {'PORT':<8} {'HITS':<10} {'BYTES':<10}"
     safe_addstr(win, 2, 0, header[:max_x - 1],
                 curses.color_pair(COLOR_HEADER))
 
     draw_separator(win, 3)
 
-    if not rules:
+    visible = [r for r in rules if show_ipv6 or not r.get("ipv6", 0)]
+
+    if not visible:
         safe_addstr(win, 5, 2, "no whiskers loaded",
                     curses.color_pair(COLOR_DIM) | curses.A_ITALIC)
-        safe_addstr(win, 6, 2, "try: sudo sealant add -f INPUT -p tcp --dport 22 -j HAUL -n ssh",
+        safe_addstr(win, 6, 2, "try: sealant add -f INPUT -p tcp --dport 22 -j HAUL -n ssh",
                     curses.color_pair(COLOR_DIM))
         return
 
     row = 4
-    for i, r in enumerate(rules[scroll:]):
+    for r in visible[scroll:]:
         if row >= max_y - 2:
             break
 
-        name     = r["name"][:24]
-        floe     = floe_str(r["floe"])[:12]
-        action   = action_str(r["action"])[:20]
-        proto    = proto_str(r["protocol"])[:8]
-        hits     = str(r["hits"])[:10]
-        bytesh   = bytes_human(r["bytes"])[:10]
+        floe   = floe_str(r["floe"])[:12]
+        action = action_str(r["action"])[:20]
+        proto  = proto_str(r["protocol"])[:8]
+        hits   = str(r["hits"])[:10]
+        bytesh = bytes_human(r["bytes"])[:10]
 
-        line = f"{r['id']:<4} {name:<24} {floe:<12} {action:<20} {proto:<8} {hits:<10} {bytesh:<10}"
+        iface = "-"
+        if r.get("iface_in") and r.get("iface_out"):
+            iface = f"{r['iface_in']}/{r['iface_out']}"
+        elif r.get("iface_in"):
+            iface = f"in:{r['iface_in']}"
+        elif r.get("iface_out"):
+            iface = f"out:{r['iface_out']}"
+
+        port = "-"
+        if r["dport_min"] > 0:
+            if r["dport_min"] == r["dport_max"]:
+                port = str(r["dport_min"])
+            else:
+                port = f"{r['dport_min']}:{r['dport_max']}"
+
+        ipv6_mark = " [6]" if r.get("ipv6") else ""
+        display_name = f"{r['name'][:20]}{ipv6_mark}"
+
+        line = f"{r['id']:<4} {display_name:<24} {floe:<12} {action:<20} {proto:<8} {iface:<16} {port:<8} {hits:<10} {bytesh:<10}"
         color = curses.color_pair(action_color(r["action"]))
         safe_addstr(win, row, 0, line[:max_x - 1], color)
         row += 1
 
-    # scroll indicator
-    total = len(rules)
+    total = len(visible)
     if total > max_y - 6:
         safe_addstr(win, max_y - 2, max_x - 20,
                     f" {scroll + 1}-{min(scroll + max_y - 6, total)}/{total} ",
@@ -286,13 +308,14 @@ def draw_status(win, rules, entries):
 
     draw_separator(win, 2)
 
-    total_hits  = sum(r["hits"] for r in rules)
-    total_bytes = sum(r["bytes"] for r in rules)
-    active      = sum(1 for r in rules if r["hits"] > 0)
+    ipv4_rules  = [r for r in rules if not r.get("ipv6", 0)]
+    total_hits  = sum(r["hits"] for r in ipv4_rules)
+    total_bytes = sum(r["bytes"] for r in ipv4_rules)
+    active      = sum(1 for r in ipv4_rules if r["hits"] > 0)
 
     stats = [
         ("Version",       f"Sealant v{VERSION}"),
-        ("Whiskers",      str(len(rules))),
+        ("Whiskers",      str(len(ipv4_rules))),
         ("Active rules",  str(active)),
         ("Total hits",    str(total_hits)),
         ("Total traffic", bytes_human(total_bytes)),
@@ -309,13 +332,12 @@ def draw_status(win, rules, entries):
                     curses.color_pair(COLOR_HAUL))
         row += 1
 
-    # top whiskers by hits
-    if rules:
+    if ipv4_rules:
         row += 1
         safe_addstr(win, row, 2, "Top whiskers by hits:",
                     curses.color_pair(COLOR_DIM) | curses.A_BOLD)
         row += 1
-        sorted_rules = sorted(rules, key=lambda r: r["hits"], reverse=True)
+        sorted_rules = sorted(ipv4_rules, key=lambda r: r["hits"], reverse=True)
         for r in sorted_rules[:5]:
             if row >= max_y - 2:
                 break
@@ -334,26 +356,26 @@ def main(stdscr):
     stdscr.timeout(REFRESH_MS)
     init_colors()
 
-    tab    = 0
-    scroll = 0
-    rules  = []
-    entries = []
+    tab       = 0
+    scroll    = 0
+    show_ipv6 = False
+    rules     = []
+    entries   = []
 
     while True:
         rules   = read_observe()
         entries = read_log()
 
         stdscr.erase()
-        draw_title(stdscr, tab)
+        draw_title(stdscr, tab, show_ipv6)
 
         if tab == 0:
-            draw_rules(stdscr, rules, scroll)
+            draw_rules(stdscr, rules, scroll, show_ipv6)
         elif tab == 1:
             draw_log(stdscr, entries, scroll)
         elif tab == 2:
             draw_status(stdscr, rules, entries)
 
-        # bottom bar
         max_y, max_x = stdscr.getmaxyx()
         uptime = f" refreshing every {REFRESH_MS // 1000}s "
         safe_addstr(stdscr, max_y - 1, 0, uptime,
@@ -373,6 +395,9 @@ def main(stdscr):
             scroll = 0
         elif key == ord('3'):
             tab = 2
+            scroll = 0
+        elif key == ord('6'):
+            show_ipv6 = not show_ipv6
             scroll = 0
         elif key == curses.KEY_DOWN or key == ord('j'):
             scroll += 1

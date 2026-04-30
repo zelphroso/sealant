@@ -187,12 +187,16 @@ static void pup_update(struct pup_entry *e, struct sk_buff *skb,
 		tcph = tcp_hdr(skb);
 		if (tcph) {
 			if (tcph->syn && !tcph->ack) {
+				/* SYN — new connection attempt */
 				e->pup.molt = MOLT_NEW;
 			} else if (tcph->syn && tcph->ack) {
-				e->pup.molt = MOLT_NEW;
+				/* SYN-ACK — promote to established */
+				e->pup.molt = MOLT_ESTABLISHED;
 			} else if (tcph->ack && !tcph->syn) {
+				/* ACK — connection established */
 				e->pup.molt = MOLT_ESTABLISHED;
 			} else if (tcph->fin || tcph->rst) {
+				/* FIN or RST — connection closing */
 				e->pup.molt = MOLT_INVALID;
 				e->expires  = jiffies + 5 * HZ;
 				return;
@@ -225,13 +229,11 @@ static void pup_gc(struct timer_list *t)
 
 		while (e) {
 			next = e->next;
-
 			if (time_after(jiffies, e->expires)) {
 				if (prev)
 					prev->next = next;
 				else
 					pup_table[i] = next;
-
 				kfree(e);
 				pup_count--;
 			} else {
@@ -242,6 +244,9 @@ static void pup_gc(struct timer_list *t)
 	}
 
 	spin_unlock_irqrestore(&ct_lock, flags);
+
+	/* piggyback NAT GC */
+	sealant_nat_gc();
 
 	mod_timer(&gc_timer, jiffies + PUP_GC_INTERVAL * HZ);
 }

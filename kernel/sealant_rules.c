@@ -58,16 +58,20 @@ int sealant_rules_save(void)
     unsigned long                 flags;
     loff_t                        pos = 0;
     int                           ret = 0;
-    uint32_t                      count;
+    uint32_t                      count = 0;
+    uint32_t                      i;
     struct sealant_whisker        *tmp;
 
     tmp = vmalloc(SEALANT_MAX_WHISKERS * sizeof(struct sealant_whisker));
     if (!tmp)
         return -ENOMEM;
 
+    /* only save IPv4 rules — IPv6 mirrors are recreated on load */
     spin_lock_irqsave(&whisker_lock, flags);
-    count = whisker_count;
-    memcpy(tmp, whisker_table, count * sizeof(struct sealant_whisker));
+    for (i = 0; i < whisker_count; i++) {
+        if (!whisker_table[i].ipv6)
+            tmp[count++] = whisker_table[i];
+    }
     spin_unlock_irqrestore(&whisker_lock, flags);
 
     f = filp_open(SEALANT_RULES_PATH,
@@ -114,21 +118,20 @@ out:
 ───────────────────────────────────────── */
 int sealant_rules_load(void)
 {
-    struct file              *f;
-    struct sealant_rules_header hdr;
-    struct sealant_whisker   *tmp;
-    unsigned long             flags;
-    loff_t                    pos = 0;
-    int                       ret = 0;
+    struct file                  *f;
+    struct sealant_rules_header   hdr;
+    struct sealant_whisker        *tmp;
+    unsigned long                 flags;
+    loff_t                        pos = 0;
+    int                           ret = 0;
+    uint32_t                      k;
 
     f = filp_open(SEALANT_RULES_PATH, O_RDONLY, 0);
     if (IS_ERR(f)) {
-        /* no rules file yet — that's fine on first boot */
         printk(KERN_INFO "sealant: no rules file found, starting fresh\n");
         return 0;
     }
 
-    /* read and validate header */
     ret = kernel_read(f, &hdr, sizeof(hdr), &pos);
     if (ret < (int)sizeof(hdr)) {
         printk(KERN_ERR "sealant: rules file too short\n");
@@ -150,7 +153,7 @@ int sealant_rules_load(void)
         goto out;
     }
 
-    if (hdr.whisker_count > SEALANT_MAX_WHISKERS) {
+    if (hdr.whisker_count > SEALANT_MAX_WHISKERS / 2) {
         printk(KERN_ERR "sealant: rules file whisker count too large\n");
         ret = -EINVAL;
         goto out;
@@ -163,8 +166,8 @@ int sealant_rules_load(void)
     }
 
     ret = kernel_read(f, tmp,
-        hdr.whisker_count * sizeof(struct sealant_whisker),
-        &pos);
+                      hdr.whisker_count * sizeof(struct sealant_whisker),
+                      &pos);
     if (ret < 0) {
         printk(KERN_ERR "sealant: rules file read failed (%d)\n", ret);
         vfree(tmp);
@@ -172,12 +175,30 @@ int sealant_rules_load(void)
         goto out;
     }
 
-    /* install atomically */
     spin_lock_irqsave(&whisker_lock, flags);
+
+    /* load IPv4 rules */
     memcpy(whisker_table, tmp,
            hdr.whisker_count * sizeof(struct sealant_whisker));
     whisker_count = hdr.whisker_count;
     memcpy(default_policy, hdr.default_policy, FLOE_MAX);
+
+    /* recreate IPv6 mirrors */
+    for (k = 0; k < hdr.whisker_count && whisker_count < SEALANT_MAX_WHISKERS; k++) {
+        if (!whisker_table[k].ipv6) {
+            struct sealant_whisker w6 = whisker_table[k];
+            w6.ipv6       = 1;
+            w6.id         = whisker_count;
+            w6.hit_count  = 0;
+            w6.byte_count = 0;
+            whisker_table[whisker_count++] = w6;
+        }
+    }
+
+    /* reassign IDs sequentially */
+    for (k = 0; k < whisker_count; k++)
+        whisker_table[k].id = k;
+
     spin_unlock_irqrestore(&whisker_lock, flags);
 
     vfree(tmp);
@@ -271,9 +292,6 @@ int sealant_rules_init(void)
     active_buf   = buf_a;
     standby_buf  = buf_b;
     active_count = 0;
-
-    sealant_rules_load();
-
     printk(KERN_INFO "sealant: rules engine initialized\n");
     return 0;
 }

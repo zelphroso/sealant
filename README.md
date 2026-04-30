@@ -49,38 +49,62 @@ That builds the kernel module and CLI, loads the module, and puts `sealant` in y
 ## usage
 
 ```bash
-# add a rule
-sudo sealant add -f INPUT -p tcp --dport 22 -j HAUL -n "allow-ssh"
+# add a rule (IPv4 + IPv6 by default)
+sealant add -f INPUT -p tcp --dport 22 -j HAUL -n "allow-ssh"
 
-# list rules
+# add an IPv6-only rule
+sealant add -f INPUT -p tcp --dport 22 -j HAUL --ipv6 -n "allow-ssh-v6"
+
+# list rules (IPv4 only)
 sealant list
 
+# list rules including IPv6 mirrors
+sealant list --all
+
 # delete a rule
-sudo sealant del -i 0
+sealant del -i 0
 
 # flush a floe
-sudo sealant flush -f INPUT
+sealant flush -f INPUT
+sealant flush -f ALL
 
 # set default policy
-sudo sealant policy -f INPUT -j DIVE
+sealant policy -f INPUT -j DIVE
 
 # migrate from iptables (dry run)
-sudo sealant migrate
+sealant migrate
 
 # migrate and apply
-sudo sealant migrate --apply
+sealant migrate --apply
+
+# migrate with IPv6
+sealant migrate --apply --ipv6
 
 # save rules to disk
-sudo sealant save
+sealant save
+
+# load rules from disk
+sealant load
+
+# hot reload from disk
+sealant reload
 
 # live TUI
-sudo sealant watch
+sealant watch
 
 # status
-sudo sealant status
+sealant status
+
+# view log
+sealant log
+
+# clear log
+sealant flush-log
 ```
 
 iptables flags work too — `-A`, `-D`, `-L`, `-F`, `-P`.
+
+rules save automatically on shutdown and reload on boot.
 
 ---
 

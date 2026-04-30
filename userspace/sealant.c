@@ -92,7 +92,7 @@ static int cmd_del(int argc, char **argv)
     return 0;
 }
 
-static int cmd_list(void)
+static int cmd_list(int show_all)
 {
     FILE *f;
     char  line[512];
@@ -114,18 +114,22 @@ static int cmd_list(void)
 
         char id_s[8], name_s[33], floe_s[8], action_s[8],
              proto_s[8], iface_in_s[17], iface_out_s[17],
-             hits_s[12], bytes_s[12];
+             hits_s[12], bytes_s[12], ipv6_s[4];
+        uint32_t dport_min, dport_max;
 
-        /* fixed width columns matching proc output */
-        if (sscanf(line, "%7s %32s %7s %7s %7s %16s %16s %11s %11s",
-                   id_s, name_s, floe_s, action_s, proto_s,
-                   iface_in_s, iface_out_s, hits_s, bytes_s) < 9)
+        if (sscanf(line, "%7s %32s %7s %7s %7s %16s %16s %6u %6u %11s %11s %3s",
+                id_s, name_s, floe_s, action_s, proto_s,
+                iface_in_s, iface_out_s,
+                &dport_min, &dport_max,
+                hits_s, bytes_s, ipv6_s) < 11)
             continue;
 
-        /* skip header */
-        if (strcmp(id_s, "ID") == 0) continue;
-        /* skip separator */
-        if (id_s[0] == '-' || id_s[0] == '─') continue;
+        if (atoi(id_s) == 0 && id_s[0] != '0') continue;
+
+        uint8_t ipv6 = (uint8_t)atoi(ipv6_s);
+
+        /* skip IPv6 mirrors unless --all */
+        if (ipv6 && !show_all) continue;
 
         struct sealant_whisker w;
         memset(&w, 0, sizeof(w));
@@ -135,6 +139,7 @@ static int cmd_list(void)
         w.protocol = (uint8_t)atoi(proto_s);
         w.hit_count  = (uint64_t)atol(hits_s);
         w.byte_count = (uint64_t)atol(bytes_s);
+        w.ipv6       = ipv6;
 
         strncpy(w.name,
                 strcmp(name_s, "(unnamed)") == 0 ? "" : name_s,
@@ -146,6 +151,9 @@ static int cmd_list(void)
                 strcmp(iface_out_s, "-") == 0 ? "" : iface_out_s,
                 SEALANT_IFACE_LEN - 1);
 
+        w.dst_port_min = (uint16_t)dport_min;
+        w.dst_port_max = (uint16_t)dport_max;
+
         print_whisker_row(&w);
     }
 
@@ -153,21 +161,42 @@ static int cmd_list(void)
     return 0;
 }
 
-/* sealant flush */
 static int cmd_flush(int argc, char **argv)
 {
-    uint8_t floe = FLOE_INPUT;
-    int     i;
+    int i;
+    int got_floe = 0;
 
     for (i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0 && i+1 < argc)
-            floe = parse_floe(argv[++i]);
+        if (strcmp(argv[i], "-f") == 0 && i+1 < argc) {
+            i++;
+            got_floe = 1;
+
+            /* flush ALL floes */
+            if (strcasecmp(argv[i], "ALL") == 0) {
+                sealant_comm_flush(FLOE_INPUT);
+                sealant_comm_flush(FLOE_OUTPUT);
+                sealant_comm_flush(FLOE_FORWARD);
+                sealant_comm_flush(FLOE_PREROUTING);
+                sealant_comm_flush(FLOE_POSTROUTING);
+                printf("sealant: all floes flushed\n");
+                return 0;
+            }
+
+            uint8_t floe = parse_floe(argv[i]);
+            if (sealant_comm_flush(floe) < 0)
+                return 1;
+            printf("sealant: floe flushed\n");
+            return 0;
+        }
     }
 
-    if (sealant_comm_flush(floe) < 0)
+    if (!got_floe) {
+        fprintf(stderr, "sealant: flush requires -f <floe>\n");
+        fprintf(stderr, "sealant: example: sealant flush -f INPUT\n");
+        fprintf(stderr, "sealant: use -f ALL to flush everything\n");
         return 1;
+    }
 
-    printf("sealant: floe flushed\n");
     return 0;
 }
 
@@ -273,8 +302,10 @@ int main(int argc, char **argv)
         return cmd_add(argc - 2, argv + 2);
     else if (strcmp(argv[1], "del") == 0)
         return cmd_del(argc - 2, argv + 2);
-    else if (strcmp(argv[1], "list") == 0)
-        return cmd_list();
+    else if (strcmp(argv[1], "list") == 0) {
+        int show_all = (argc > 2 && strcmp(argv[2], "--all") == 0);
+        return cmd_list(show_all);
+    }
     else if (strcmp(argv[1], "flush") == 0)
         return cmd_flush(argc - 2, argv + 2);
     else if (strcmp(argv[1], "policy") == 0)

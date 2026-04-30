@@ -141,15 +141,6 @@ void sealant_log_packet(struct sk_buff *skb,
 
     spin_unlock_irqrestore(&log_lock, flags);
 
-    printk(KERN_INFO "sealant: [%s] rule='%s' floe=%s proto=%s "
-           "src=%pI4:%u dst=%pI4:%u len=%u\n",
-           action_to_str(action),
-           e->rule_name,
-           floe_to_str(floe),
-           proto_to_str(proto),
-           &e->src_ip, src_port,
-           &e->dst_ip, dst_port,
-           skb->len);
 }
 
 /* ─────────────────────────────────────────

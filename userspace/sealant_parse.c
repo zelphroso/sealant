@@ -227,6 +227,7 @@ const char *normalize_flag(const char *flag)
    parses argc/argv into a whisker struct
    shared between cmd_add and iptables compat
 ───────────────────────────────────────── */
+
 int parse_whisker(int argc, char **argv, struct sealant_whisker *w)
 {
     int   i;
@@ -376,6 +377,21 @@ int parse_whisker(int argc, char **argv, struct sealant_whisker *w)
             if (inet_aton(tmp, &addr))
                 w->nat_ip = ntohl(addr.s_addr);
         }
+    }
+
+    /* warn on overly broad HAUL rules */
+    if (w->action == ACTION_HAUL &&
+        w->src_ip == 0 &&
+        w->dst_ip == 0 &&
+        w->dst_port_min == 0 &&
+        w->dst_port_max == 0 &&
+        w->iface_in[0] == '\0' &&
+        w->iface_out[0] == '\0' &&
+        w->protocol == PROTO_ANY &&
+        w->molt_mask == 0) {
+        fprintf(stderr, "sealant: warning — broad HAUL rule will "
+                "match all traffic on %s\n",
+                floe_to_str(w->floe));
     }
 
     return 0;

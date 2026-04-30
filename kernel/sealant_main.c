@@ -20,12 +20,14 @@
 #include <net/tcp.h>
 #include <net/icmp.h>
 #include <net/addrconf.h>
+#include <linux/workqueue.h>
 
 #include "../include/sealant.h"
 
 /* ─────────────────────────────────────────
    MODULE METADATA
 ───────────────────────────────────────── */
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("zelphroso");
 MODULE_DESCRIPTION("Sealant, Strong security with a softer side.");
@@ -34,14 +36,24 @@ MODULE_VERSION(SEALANT_VERSION);
 /* ─────────────────────────────────────────
    GLOBAL RULE TABLE
 ───────────────────────────────────────── */
+
 struct sealant_whisker	whisker_table[SEALANT_MAX_WHISKERS];
 uint32_t			    whisker_count = 0;
 DEFINE_SPINLOCK(whisker_lock);
 static struct sealant_rate_state rate_state[SEALANT_MAX_WHISKERS];
 
+static struct delayed_work rules_load_work;
+
+static void rules_load_worker(struct work_struct *work)
+{
+	sealant_rules_load();
+	printk(KERN_INFO "sealant: rules loaded from delayed worker\n");
+}
+
 /* ─────────────────────────────────────────
    DEFAULT POLICIES
 ───────────────────────────────────────── */
+
 uint8_t default_policy[FLOE_MAX] = {
 	[FLOE_INPUT]       = ACTION_HAUL,
 	[FLOE_OUTPUT]      = ACTION_HAUL,
@@ -53,6 +65,7 @@ uint8_t default_policy[FLOE_MAX] = {
 /* ─────────────────────────────────────────
    FORWARD DECLARATIONS
 ───────────────────────────────────────── */
+
 static unsigned int sealant_hook_ipv4_in(void *priv, struct sk_buff *skb,
 					  const struct nf_hook_state *state);
 static unsigned int sealant_hook_ipv4_out(void *priv, struct sk_buff *skb,
@@ -81,8 +94,6 @@ static int rate_limit_check(uint32_t whisker_id,
     uint64_t delta  = now - rs->last_refill;
     uint64_t refill;
 
-    /* refill tokens based on time elapsed */
-    /* rate_limit is packets per minute */
     refill = (delta * rate_limit) / 60000;
 
     if (refill > 0) {
@@ -108,6 +119,7 @@ static int rate_limit_check(uint32_t whisker_id,
 /* ─────────────────────────────────────────
    CORE PACKET EVALUATOR
 ───────────────────────────────────────── */
+
 static unsigned int evaluate_packet(struct sk_buff *skb,
 				     const struct nf_hook_state *state,
 				     uint8_t floe)
@@ -123,6 +135,9 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 	uint32_t		i;
 	unsigned long		flags;
 
+	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+		return NF_ACCEPT;
+
 	iph = ip_hdr(skb);
 	if (!iph)
 		return NF_ACCEPT;
@@ -132,12 +147,16 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 	proto  = iph->protocol;
 
 	if (proto == IPPROTO_TCP) {
+		if (!pskb_may_pull(skb, ip_hdrlen(skb) + sizeof(struct tcphdr)))
+			return NF_ACCEPT;
 		tcph = tcp_hdr(skb);
 		if (tcph) {
 			src_port = ntohs(tcph->source);
 			dst_port = ntohs(tcph->dest);
 		}
 	} else if (proto == IPPROTO_UDP) {
+		if (!pskb_may_pull(skb, ip_hdrlen(skb) + sizeof(struct udphdr)))
+			return NF_ACCEPT;
 		udph = udp_hdr(skb);
 		if (udph) {
 			src_port = ntohs(udph->source);
@@ -145,7 +164,6 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 		}
 	}
 
-	/* conntrack — get connection state for this packet */
 	pkt_molt = sealant_ct_track(skb, proto, src_ip, dst_ip,
 				     src_port, dst_port);
 
@@ -156,71 +174,52 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 
 		if (!w->enabled)
 			continue;
-
 		if (w->floe != floe)
 			continue;
-
 		if (w->ipv6)
 			continue;
-
-		/* protocol match */
 		if (w->protocol != PROTO_ANY && w->protocol != proto)
 			continue;
-
-		/* connection state match */
 		if (w->molt_mask != 0) {
 			if (!(w->molt_mask & pkt_molt))
 				continue;
 		}
-
-		/* source IP match */
 		if (w->src_ip != 0) {
 			if ((src_ip & w->src_mask) != (w->src_ip & w->src_mask))
 				continue;
 		}
-
-		/* destination IP match */
 		if (w->dst_ip != 0) {
 			if ((dst_ip & w->dst_mask) != (w->dst_ip & w->dst_mask))
 				continue;
 		}
-
-		/* destination port match */
 		if (w->dst_port_min != 0 || w->dst_port_max != 0) {
 			if (dst_port < w->dst_port_min || dst_port > w->dst_port_max)
 				continue;
 		}
-
-		/* source port match */
 		if (w->src_port_min != 0 || w->src_port_max != 0) {
 			if (src_port < w->src_port_min || src_port > w->src_port_max)
 				continue;
 		}
-
-		/* interface match */
 		if (w->iface_in[0] != '\0' && state->in) {
 			if (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) != 0)
 				continue;
 		}
-
 		if (w->iface_out[0] != '\0' && state->out) {
 			if (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) != 0)
 				continue;
 		}
 
-		/* rule matched — update counters */
 		w->hit_count++;
 		w->byte_count += skb->len;
 
 		if (w->rate_limit > 0) {
-		    if (!rate_limit_check(i, w->rate_limit,
-						w->rate_burst ? w->rate_burst : w->rate_limit)) {
+			if (!rate_limit_check(i, w->rate_limit,
+					      w->rate_burst ? w->rate_burst : w->rate_limit)) {
 				spin_unlock_irqrestore(&whisker_lock, flags);
 				return NF_DROP;
 			}
 		}
 
-		/* NAT processing — runs before filter actions */
 		if (w->pod == POD_NAT && w->nat_type != NAT_NONE) {
 			spin_unlock_irqrestore(&whisker_lock, flags);
 			sealant_nat_process(skb, state, w,
@@ -229,7 +228,6 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 			return NF_ACCEPT;
 		}
 
-		/* filter actions */
 		switch (w->action) {
 		case ACTION_HAUL:
 			spin_unlock_irqrestore(&whisker_lock, flags);
@@ -252,7 +250,6 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 
 	spin_unlock_irqrestore(&whisker_lock, flags);
 
-	/* no rule matched — apply default policy */
 	switch (default_policy[floe]) {
 	case ACTION_DIVE: return NF_DROP;
 	default:          return NF_ACCEPT;
@@ -262,6 +259,7 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 /* ─────────────────────────────────────────
    NETFILTER HOOKS - IPv4
 ───────────────────────────────────────── */
+
 static unsigned int sealant_hook_ipv4_in(void *priv, struct sk_buff *skb,
 					  const struct nf_hook_state *state)
 {
@@ -283,6 +281,7 @@ static unsigned int sealant_hook_ipv4_fwd(void *priv, struct sk_buff *skb,
 /* ─────────────────────────────────────────
    IPV6 PACKET EVALUATOR
 ───────────────────────────────────────── */
+
 static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 					  const struct nf_hook_state *state,
 					  uint8_t floe)
@@ -330,11 +329,9 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 		if (!w->ipv6)
 			continue;
 
-		/* protocol match */
 		if (w->protocol != PROTO_ANY && w->protocol != proto)
 			continue;
 
-		/* source IPv6 match */
 		if (!ipv6_addr_any((struct in6_addr *)w->src_ip6)) {
 			struct in6_addr masked_src, masked_rule;
 			int j;
@@ -348,7 +345,6 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 				continue;
 		}
 
-		/* destination IPv6 match */
 		if (!ipv6_addr_any((struct in6_addr *)w->dst_ip6)) {
 			struct in6_addr masked_dst, masked_rule;
 			int j;
@@ -362,7 +358,6 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 				continue;
 		}
 
-		/* destination port match */
 		if (w->dst_port_min != 0 || w->dst_port_max != 0) {
 			if (dst_port < w->dst_port_min || dst_port > w->dst_port_max)
 				continue;
@@ -385,11 +380,9 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 				continue;
 		}
 
-		/* rule matched — update counters */
 		w->hit_count++;
 		w->byte_count += skb->len;
 
-		/* rate limiting */
 		if (w->rate_limit > 0) {
 			if (!rate_limit_check(i, w->rate_limit,
 					      w->rate_burst ? w->rate_burst : w->rate_limit)) {
@@ -430,6 +423,7 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
    NETFILTER HOOKS - IPv6
    stubs — full impl in dual-stack pass
 ───────────────────────────────────────── */
+
 static unsigned int sealant_hook_ipv6_in(void *priv, struct sk_buff *skb,
 					  const struct nf_hook_state *state)
 {
@@ -451,6 +445,7 @@ static unsigned int sealant_hook_ipv6_fwd(void *priv, struct sk_buff *skb,
 /* ─────────────────────────────────────────
    HOOK REGISTRATIONS
 ───────────────────────────────────────── */
+
 static struct nf_hook_ops sealant_hooks[] = {
 	/* IPv4 */
 	{
@@ -495,6 +490,7 @@ static struct nf_hook_ops sealant_hooks[] = {
 /* ─────────────────────────────────────────
    IOCTL HANDLER
 ───────────────────────────────────────── */
+
 static long sealant_ioctl(struct file *file, unsigned int cmd,
 			   unsigned long arg)
 {
@@ -516,10 +512,39 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 			spin_unlock_irqrestore(&whisker_lock, flags);
 			return -ENOMEM;
 		}
+		/* shadow check */
+		{
+			uint32_t k;
+			for (k = 0; k < whisker_count; k++) {
+				struct sealant_whisker *existing = &whisker_table[k];
+				if (!existing->enabled) continue;
+				if (existing->floe != w.floe) continue;
+				if (existing->src_ip == 0 &&
+				    existing->dst_ip == 0 &&
+				    existing->dst_port_min == 0 &&
+				    existing->dst_port_max == 0 &&
+				    existing->iface_in[0] == '\0' &&
+				    existing->iface_out[0] == '\0' &&
+				    existing->molt_mask == 0 &&
+				    existing->protocol == PROTO_ANY) {
+					printk(KERN_WARNING "sealant: whisker may be "
+					       "shadowed by rule %u\n", existing->id);
+					break;
+				}
+			}
+		}
 		w.id         = whisker_count;
 		w.hit_count  = 0;
 		w.byte_count = 0;
 		whisker_table[whisker_count++] = w;
+		if (!w.ipv6 && whisker_count < SEALANT_MAX_WHISKERS) {
+			struct sealant_whisker w6 = w;
+			w6.ipv6       = 1;
+			w6.id         = whisker_count;
+			w6.hit_count  = 0;
+			w6.byte_count = 0;
+			whisker_table[whisker_count++] = w6;
+		}
 		spin_unlock_irqrestore(&whisker_lock, flags);
 		break;
 
@@ -531,9 +556,26 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 			spin_unlock_irqrestore(&whisker_lock, flags);
 			return -EINVAL;
 		}
-		memmove(&whisker_table[id], &whisker_table[id + 1],
-			(whisker_count - id - 1) * sizeof(struct sealant_whisker));
-		whisker_count--;
+		if (id + 1 < whisker_count &&
+		    whisker_table[id + 1].ipv6 == 1 &&
+		    whisker_table[id + 1].floe == whisker_table[id].floe &&
+		    whisker_table[id + 1].action == whisker_table[id].action &&
+		    whisker_table[id + 1].protocol == whisker_table[id].protocol &&
+		    whisker_table[id + 1].dst_port_min == whisker_table[id].dst_port_min &&
+		    whisker_table[id + 1].dst_port_max == whisker_table[id].dst_port_max) {
+			memmove(&whisker_table[id], &whisker_table[id + 2],
+				(whisker_count - id - 2) * sizeof(struct sealant_whisker));
+			whisker_count -= 2;
+		} else {
+			memmove(&whisker_table[id], &whisker_table[id + 1],
+				(whisker_count - id - 1) * sizeof(struct sealant_whisker));
+			whisker_count--;
+		}
+		{
+			uint32_t k;
+			for (k = id; k < whisker_count; k++)
+				whisker_table[k].id = k;
+		}
 		spin_unlock_irqrestore(&whisker_lock, flags);
 		break;
 
@@ -548,12 +590,13 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 					whisker_table[j++] = whisker_table[i];
 			}
 			whisker_count = j;
+			for (j = 0; j < whisker_count; j++)
+				whisker_table[j].id = j;
 		}
 		spin_unlock_irqrestore(&whisker_lock, flags);
 		break;
 
 	case SEALANT_IOC_SET_POLICY:
-		/* high nibble = floe, low nibble = action */
 		if (copy_from_user(&payload, (void __user *)arg, sizeof(payload)))
 			return -EFAULT;
 		floe   = (payload >> 4) & 0x0F;
@@ -568,30 +611,30 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 		break;
 
 	case SEALANT_IOC_SAVE_RULES:
-        ret = sealant_rules_save();
-        break;
+		ret = sealant_rules_save();
+		break;
 
-    case SEALANT_IOC_LOAD_RULES:
-        ret = sealant_rules_load();
-        break;
+	case SEALANT_IOC_LOAD_RULES:
+		ret = sealant_rules_load();
+		break;
 
-    case SEALANT_IOC_FLUSH_LOG:
-        sealant_log_flush();
-        break;
+	case SEALANT_IOC_FLUSH_LOG:
+		sealant_log_flush();
+		break;
 
-    case SEALANT_IOC_GET_STATS:
-    {
-        struct sealant_stats s;
-        memset(&s, 0, sizeof(s));
-        spin_lock_irqsave(&whisker_lock, flags);
-        s.whisker_count = whisker_count;
-        spin_unlock_irqrestore(&whisker_lock, flags);
-        s.pup_count     = sealant_ct_count();
-        strncpy(s.version, SEALANT_VERSION, sizeof(s.version) - 1);
-        if (copy_to_user((void __user *)arg, &s, sizeof(s)))
-            return -EFAULT;
-        break;
-    }
+	case SEALANT_IOC_GET_STATS:
+	{
+		struct sealant_stats s;
+		memset(&s, 0, sizeof(s));
+		spin_lock_irqsave(&whisker_lock, flags);
+		s.whisker_count = whisker_count;
+		spin_unlock_irqrestore(&whisker_lock, flags);
+		s.pup_count     = sealant_ct_count();
+		strncpy(s.version, SEALANT_VERSION, sizeof(s.version) - 1);
+		if (copy_to_user((void __user *)arg, &s, sizeof(s)))
+			return -EFAULT;
+		break;
+	}
 
 	default:
 		ret = -ENOTTY;
@@ -603,6 +646,7 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 /* ─────────────────────────────────────────
    MISC DEVICE
 ───────────────────────────────────────── */
+
 static const struct file_operations sealant_fops = {
 	.owner          = THIS_MODULE,
 	.unlocked_ioctl = sealant_ioctl,
@@ -617,32 +661,37 @@ static struct miscdevice sealant_dev = {
 /* ─────────────────────────────────────────
    PROC ENTRY (/proc/sealant/observe)
 ───────────────────────────────────────── */
+
 static int sealant_proc_show(struct seq_file *m, void *v)
 {
-    uint32_t      i;
-    unsigned long flags;
+	uint32_t      i;
+	unsigned long flags;
 
-    seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-10s %-10s\n",
-               "ID", "NAME", "FLOE", "ACTION", "PROTO",
-               "IFACE_IN", "IFACE_OUT", "HITS", "BYTES");
+	seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-6s %-6s %-10s %-10s %-4s\n",
+		   "ID", "NAME", "FLOE", "ACTION", "PROTO",
+		   "IFACE_IN", "IFACE_OUT", "DPORT_MIN", "DPORT_MAX",
+		   "HITS", "BYTES", "IP6");
 
-    spin_lock_irqsave(&whisker_lock, flags);
-    for (i = 0; i < whisker_count; i++) {
-        struct sealant_whisker *w = &whisker_table[i];
-        seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-10llu %-10llu\n",
-                   w->id,
-                   w->name[0] ? w->name : "(unnamed)",
-                   w->floe,
-                   w->action,
-                   w->protocol,
-                   w->iface_in[0]  ? w->iface_in  : "-",
-                   w->iface_out[0] ? w->iface_out : "-",
-                   w->hit_count,
-                   w->byte_count);
-    }
-    spin_unlock_irqrestore(&whisker_lock, flags);
+	spin_lock_irqsave(&whisker_lock, flags);
+	for (i = 0; i < whisker_count; i++) {
+		struct sealant_whisker *w = &whisker_table[i];
+		seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-6u %-6u %-10llu %-10llu %-4u\n",
+			   w->id,
+			   w->name[0] ? w->name : "(unnamed)",
+			   w->floe,
+			   w->action,
+			   w->protocol,
+			   w->iface_in[0]  ? w->iface_in  : "-",
+			   w->iface_out[0] ? w->iface_out : "-",
+			   w->dst_port_min,
+			   w->dst_port_max,
+			   w->hit_count,
+			   w->byte_count,
+			   w->ipv6);
+	}
+	spin_unlock_irqrestore(&whisker_lock, flags);
 
-    return 0;
+	return 0;
 }
 
 static int sealant_proc_open(struct inode *inode, struct file *file)
@@ -660,6 +709,7 @@ static const struct proc_ops sealant_proc_ops = {
 /* ─────────────────────────────────────────
    MODULE INIT
 ───────────────────────────────────────── */
+
 static int __init sealant_init(void)
 {
 	int ret;
@@ -681,7 +731,7 @@ static int __init sealant_init(void)
 
 	ret = sealant_log_init();
 	if (ret) {
-	    printk(KERN_ERR "sealant: log init failed (%d)\n", ret);
+		printk(KERN_ERR "sealant: log init failed (%d)\n", ret);
 		sealant_log_exit();
 		misc_deregister(&sealant_dev);
 		sealant_ct_exit();
@@ -690,16 +740,16 @@ static int __init sealant_init(void)
 
 	ret = sealant_rules_init();
 	if (ret) {
-        printk(KERN_ERR "sealant: rules init failed (%d)\n", ret);
-        sealant_log_exit();
-        misc_deregister(&sealant_dev);
-        sealant_ct_exit();
-        return ret;
+		printk(KERN_ERR "sealant: rules init failed (%d)\n", ret);
+		sealant_log_exit();
+		misc_deregister(&sealant_dev);
+		sealant_ct_exit();
+		return ret;
 	}
 
 	ret = sealant_nat_init();
 	if (ret) {
-	    printk(KERN_ERR "sealant: NAT init failed (%d)\n", ret);
+		printk(KERN_ERR "sealant: NAT init failed (%d)\n", ret);
 		sealant_rules_exit();
 		sealant_log_exit();
 		misc_deregister(&sealant_dev);
@@ -723,6 +773,10 @@ static int __init sealant_init(void)
 		return ret;
 	}
 
+	/* defer rule loading by 5s to allow filesystem and SELinux to settle */
+	INIT_DELAYED_WORK(&rules_load_work, rules_load_worker);
+	schedule_delayed_work(&rules_load_work, 5 * HZ);
+
 	printk(KERN_INFO "sealant: loaded - %d hooks registered\n",
 	       (int)ARRAY_SIZE(sealant_hooks));
 
@@ -732,9 +786,12 @@ static int __init sealant_init(void)
 /* ─────────────────────────────────────────
    MODULE EXIT
 ───────────────────────────────────────── */
+
 static void __exit sealant_exit(void)
 {
 	printk(KERN_INFO "sealant: unloading\n");
+
+	cancel_delayed_work_sync(&rules_load_work);
 
 	remove_proc_entry("sealant/observe", NULL);
 	remove_proc_entry("sealant", NULL);
