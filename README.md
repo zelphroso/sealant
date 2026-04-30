@@ -24,6 +24,20 @@ To fit with the seal theme I originally went for, it has it's own terminology, b
 
 ---
 
+## why sealant
+
+Sealant exists to replace iptables without inheriting its complexity.
+
+* lean rule system that avoids legacy layering and redundant abstractions
+* predictable behavior with explicit and consistent rules
+* built-in migration, persistence, and live monitoring
+* kernel-level performance with no userspace filtering overhead
+* familiar iptables flags with simplified terminology
+
+Designed to feel like what iptables would be if it were built today.
+
+---
+
 ## requirements
 
 - Linux kernel 6.x
@@ -138,6 +152,7 @@ Kernel 6.12 — 6.17 confirmed working.
 
 ## license
 
-GPL-3.0. See [LICENSE](LICENSE).
+- Linux kernel module (`/kernel`): GPL-2.0
+- CLI / GUI: MIT-2.0
 
----
+See respective LICENSE files in each directory.
