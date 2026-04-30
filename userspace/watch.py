@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: MIT
+# Sealant — iptables replacement firewall
+# Copyright (C) 2026 Ven Robinson <zelphroso>
+# https://github.com/zelphroso/sealant
 #!/usr/bin/env python3
 
 import curses
@@ -11,7 +15,7 @@ OBSERVE_PATH = "/proc/sealant/observe"
 LOG_PATH     = "/proc/sealant/log"
 REFRESH_MS   = 1000
 
-VERSION = "1.0.0.25"
+VERSION = "1.0.0.26"
 
 # ─────────────────────────────────────────
 # DATA READERS

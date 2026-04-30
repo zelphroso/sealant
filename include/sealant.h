@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * Sealant — iptables replacement firewall
+ * Copyright (C) 2026 Ven Robinson <zelphroso>
+ * https://github.com/zelphroso/sealant
+ *
+ * This file is dual licensed under GPL-2.0 (for kernel use)
+ * and MIT (for userspace use). Use whichever license applies
+ * to your context.
+ */
+
 #ifndef SEALANT_H
 #define SEALANT_H
 
@@ -12,7 +23,7 @@
 /* ─────────────────────────────────────────
    VERSION
 ───────────────────────────────────────── */
-#define SEALANT_VERSION      "1.0.0.25"
+#define SEALANT_VERSION      "1.0.0.26"
 #define SEALANT_IOCTL_MAGIC  0x5E
 
 /* ─────────────────────────────────────────

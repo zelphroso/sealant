@@ -1,3 +1,15 @@
+// SPDX-License-Identifier: MIT
+/*
+ * Sealant — iptables replacement firewall
+ * Copyright (C) 2026 Ven Robinson <zelphroso>
+ * https://github.com/zelphroso/sealant
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software to use, copy, modify, merge,
+ * publish, distribute, sublicense, and/or sell copies of the
+ * Software without restriction.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
