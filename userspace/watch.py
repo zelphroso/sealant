@@ -15,7 +15,7 @@ OBSERVE_PATH = "/proc/sealant/observe"
 LOG_PATH     = "/proc/sealant/log"
 REFRESH_MS   = 1000
 
-VERSION = "1.0.0.26"
+VERSION = "1.0.1.26"
 
 # ─────────────────────────────────────────
 # DATA READERS
@@ -31,18 +31,20 @@ def read_observe():
                 continue
             try:
                 rule = {
-                    "id":        int(parts[0]),
-                    "name":      parts[1],
-                    "floe":      int(parts[2]),
-                    "action":    int(parts[3]),
-                    "protocol":  int(parts[4]),
-                    "iface_in":  parts[5] if parts[5] != "-" else "",
-                    "iface_out": parts[6] if parts[6] != "-" else "",
-                    "dport_min": int(parts[7]),
-                    "dport_max": int(parts[8]),
-                    "hits":      int(parts[9]),
-                    "bytes":     int(parts[10]),
-                    "ipv6":      int(parts[11]),
+                    "id":              int(parts[0]),
+                    "name":            parts[1],
+                    "floe":            int(parts[2]),
+                    "action":          int(parts[3]),
+                    "protocol":        int(parts[4]),
+                    "iface_in":        parts[5] if parts[5] != "-" else "",
+                    "iface_out":       parts[6] if parts[6] != "-" else "",
+                    "dport_min":       int(parts[7]),
+                    "dport_max":       int(parts[8]),
+                    "hits":            int(parts[9]),
+                    "bytes":           int(parts[10]),
+                    "ipv6":            int(parts[11]),
+                    "negate_iface_in":  int(parts[12]) if len(parts) > 12 else 0,
+                    "negate_iface_out": int(parts[13]) if len(parts) > 13 else 0,
                 }
                 rules.append(rule)
             except ValueError:
@@ -246,12 +248,14 @@ def draw_rules(win, rules, scroll, show_ipv6=False):
         bytesh = bytes_human(r["bytes"])[:10]
 
         iface = "-"
+        n_in  = r.get("negate_iface_in", 0)
+        n_out = r.get("negate_iface_out", 0)
         if r.get("iface_in") and r.get("iface_out"):
-            iface = f"{r['iface_in']}/{r['iface_out']}"
+            iface = f"{'!' if n_in else ''}{r['iface_in']}/{'!' if n_out else ''}{r['iface_out']}"
         elif r.get("iface_in"):
-            iface = f"in:{r['iface_in']}"
+            iface = f"in:{'!' if n_in else ''}{r['iface_in']}"
         elif r.get("iface_out"):
-            iface = f"out:{r['iface_out']}"
+            iface = f"out:{'!' if n_out else ''}{r['iface_out']}"
 
         port = "-"
         if r["dport_min"] > 0:

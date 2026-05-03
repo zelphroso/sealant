@@ -212,12 +212,14 @@ static unsigned int evaluate_packet(struct sk_buff *skb,
 				continue;
 		}
 		if (w->iface_in[0] != '\0' && state->in) {
-			if (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) != 0)
-				continue;
+            int match = (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) == 0);
+            if (match == !!w->negate_iface_in)
+                continue;
 		}
 		if (w->iface_out[0] != '\0' && state->out) {
-			if (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) != 0)
-				continue;
+            int match = (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) == 0);
+            if (match == !!w->negate_iface_out)
+                continue;
 		}
 
 		w->hit_count++;
@@ -382,13 +384,14 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 
 		/* interface match */
 		if (w->iface_in[0] != '\0' && state->in) {
-			if (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) != 0)
-				continue;
+            int match = (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) == 0);
+            if (match == w->negate_iface_in)
+                continue;
 		}
-
 		if (w->iface_out[0] != '\0' && state->out) {
-			if (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) != 0)
-				continue;
+            int match = (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) == 0);
+            if (match == w->negate_iface_out)
+                continue;
 		}
 
 		w->hit_count++;
@@ -548,7 +551,7 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 		w.hit_count  = 0;
 		w.byte_count = 0;
 		whisker_table[whisker_count++] = w;
-		if (!w.ipv6 && whisker_count < SEALANT_MAX_WHISKERS) {
+		if (!w.ipv6 && !w.ipv4_only && whisker_count < SEALANT_MAX_WHISKERS) {
 			struct sealant_whisker w6 = w;
 			w6.ipv6       = 1;
 			w6.id         = whisker_count;
@@ -678,15 +681,15 @@ static int sealant_proc_show(struct seq_file *m, void *v)
 	uint32_t      i;
 	unsigned long flags;
 
-	seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-6s %-6s %-10s %-10s %-4s\n",
-		   "ID", "NAME", "FLOE", "ACTION", "PROTO",
-		   "IFACE_IN", "IFACE_OUT", "DPORT_MIN", "DPORT_MAX",
-		   "HITS", "BYTES", "IP6");
+	seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-6s %-6s %-10s %-10s %-4s %-4s %-4s\n",
+           "ID", "NAME", "FLOE", "ACTION", "PROTO",
+           "IFACE_IN", "IFACE_OUT", "DPORT_MIN", "DPORT_MAX",
+           "HITS", "BYTES", "IP6", "N_IN", "N_OUT");
 
 	spin_lock_irqsave(&whisker_lock, flags);
 	for (i = 0; i < whisker_count; i++) {
 		struct sealant_whisker *w = &whisker_table[i];
-		seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-6u %-6u %-10llu %-10llu %-4u\n",
+		seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-6u %-6u %-10llu %-10llu %-4u %-4u %-4u\n",
 			   w->id,
 			   w->name[0] ? w->name : "(unnamed)",
 			   w->floe,
@@ -698,7 +701,8 @@ static int sealant_proc_show(struct seq_file *m, void *v)
 			   w->dst_port_max,
 			   w->hit_count,
 			   w->byte_count,
-			   w->ipv6);
+			   w->ipv6,
+			   w->negate_iface_in, w->negate_iface_out);
 	}
 	spin_unlock_irqrestore(&whisker_lock, flags);
 

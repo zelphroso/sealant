@@ -23,7 +23,7 @@
 /* ─────────────────────────────────────────
    VERSION
 ───────────────────────────────────────── */
-#define SEALANT_VERSION      "1.0.0.26"
+#define SEALANT_VERSION      "1.0.1.26"
 #define SEALANT_IOCTL_MAGIC  0x5E
 
 /* ─────────────────────────────────────────
@@ -148,6 +148,9 @@ struct sealant_whisker {
     /* interfaces */
     char        iface_in[SEALANT_IFACE_LEN];
     char        iface_out[SEALANT_IFACE_LEN];
+    uint8_t     negate_iface_in;
+    uint8_t     negate_iface_out;
+    uint8_t     ipv4_only;
 
     /* connection state bitmask */
     uint8_t     molt_mask;

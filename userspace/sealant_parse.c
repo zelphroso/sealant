@@ -299,13 +299,29 @@ int parse_whisker(int argc, char **argv, struct sealant_whisker *w)
 
         /* input interface */
         else if ((strcmp(argv[i], "-i") == 0 ||
-                  strcmp(argv[i], "--in-interface") == 0) && i+1 < argc)
-            strncpy(w->iface_in, argv[++i], SEALANT_IFACE_LEN - 1);
+                strcmp(argv[i], "--in-interface") == 0) && i+1 < argc) {
+            val = argv[++i];
+            if (val[0] == '!') {
+                w->negate_iface_in = 1;
+                val++;
+                if (val[0] == '\0' && i+1 < argc)
+                    val = argv[++i];
+            }
+            strncpy(w->iface_in, val, SEALANT_IFACE_LEN - 1);
+        }
 
         /* output interface */
         else if ((strcmp(argv[i], "-o") == 0 ||
-                  strcmp(argv[i], "--out-interface") == 0) && i+1 < argc)
-            strncpy(w->iface_out, argv[++i], SEALANT_IFACE_LEN - 1);
+                strcmp(argv[i], "--out-interface") == 0) && i+1 < argc) {
+            val = argv[++i];
+            if (val[0] == '!') {
+                w->negate_iface_out = 1;
+                val++;
+                if (val[0] == '\0' && i+1 < argc)
+                    val = argv[++i];
+            }
+            strncpy(w->iface_out, val, SEALANT_IFACE_LEN - 1);
+        }
 
         /* rule name */
         else if ((strcmp(argv[i], "-n") == 0 ||
@@ -348,6 +364,11 @@ int parse_whisker(int argc, char **argv, struct sealant_whisker *w)
         else if (strcmp(argv[i], "--ipv6") == 0 ||
                  strcmp(argv[i], "-6") == 0)
             w->ipv6 = 1;
+
+        /* IPv4 only */
+        else if (strcmp(argv[i], "--ipv4") == 0 ||
+                 strcmp(argv[i], "-4") == 0)
+            w->ipv4_only = 1;
 
         /* log prefix */
         else if (strcmp(argv[i], "--log-prefix") == 0 && i+1 < argc)
@@ -423,11 +444,15 @@ void print_whisker_row(struct sealant_whisker *w)
     char iface_buf[34] = "-";
 
     if (w->iface_in[0] && w->iface_out[0])
-        snprintf(iface_buf, sizeof(iface_buf), "%s/%s", w->iface_in, w->iface_out);
+        snprintf(iface_buf, sizeof(iface_buf), "%s%s/%s%s",
+                 w->negate_iface_in  ? "!" : "", w->iface_in,
+                 w->negate_iface_out ? "!" : "", w->iface_out);
     else if (w->iface_in[0])
-        snprintf(iface_buf, sizeof(iface_buf), "in:%s", w->iface_in);
+        snprintf(iface_buf, sizeof(iface_buf), "in:%s%s",
+                 w->negate_iface_in ? "!" : "", w->iface_in);
     else if (w->iface_out[0])
-        snprintf(iface_buf, sizeof(iface_buf), "out:%s", w->iface_out);
+        snprintf(iface_buf, sizeof(iface_buf), "out:%s%s",
+                 w->negate_iface_out ? "!" : "", w->iface_out);
 
     /* build action string with iptables alias */
     snprintf(action_buf, sizeof(action_buf), "%s (%s)",

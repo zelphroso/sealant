@@ -126,14 +126,14 @@ static int cmd_list(int show_all)
 
         char id_s[8], name_s[33], floe_s[8], action_s[8],
              proto_s[8], iface_in_s[17], iface_out_s[17],
-             hits_s[12], bytes_s[12], ipv6_s[4];
+             hits_s[12], bytes_s[12], ipv6_s[4], n_in_s[4], n_out_s[4];
         uint32_t dport_min, dport_max;
 
-        if (sscanf(line, "%7s %32s %7s %7s %7s %16s %16s %6u %6u %11s %11s %3s",
+        if (sscanf(line, "%7s %32s %7s %7s %7s %16s %16s %6u %6u %11s %11s %3s %3s %3s",
                 id_s, name_s, floe_s, action_s, proto_s,
                 iface_in_s, iface_out_s,
                 &dport_min, &dport_max,
-                hits_s, bytes_s, ipv6_s) < 11)
+                hits_s, bytes_s, ipv6_s, n_in_s, n_out_s) < 11)
             continue;
 
         if (atoi(id_s) == 0 && id_s[0] != '0') continue;
@@ -152,6 +152,8 @@ static int cmd_list(int show_all)
         w.hit_count  = (uint64_t)atol(hits_s);
         w.byte_count = (uint64_t)atol(bytes_s);
         w.ipv6       = ipv6;
+        w.negate_iface_in  = (uint8_t)atoi(n_in_s);
+        w.negate_iface_out = (uint8_t)atoi(n_out_s);
 
         strncpy(w.name,
                 strcmp(name_s, "(unnamed)") == 0 ? "" : name_s,
