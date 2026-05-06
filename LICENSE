@@ -1,0 +1,13 @@
+Sealant — iptables replacement firewall
+Copyright (C) 2026 Ven Robinson <zelphroso>
+
+This project uses a split license:
+
+kernel/         — GNU General Public License v2.0 only
+                  See LICENSE.GPL-2.0
+
+userspace/      — MIT License
+                  See LICENSE.MIT
+
+include/        — Dual licensed GPL-2.0 / MIT
+                  Use whichever applies to your context

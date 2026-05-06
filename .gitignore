@@ -1,0 +1,33 @@
+# kernel build artifacts
+kernel/*.o
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/*.mod.o
+kernel/*.symvers
+kernel/*.order
+kernel/.*.cmd
+kernel/.tmp_versions/
+kernel/Module.symvers
+kernel/modules.order
+
+# userspace build artifacts
+userspace/sealant
+userspace/*.o
+
+# rules file — machine specific
+/etc/sealant/
+
+# compile commands
+compile_commands.json
+.clangd
+
+# editor
+.zed/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
