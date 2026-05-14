@@ -23,17 +23,26 @@
 /* ─────────────────────────────────────────
    VERSION
 ───────────────────────────────────────── */
-#define SEALANT_VERSION      "1.0.2.26-beta"
+#define SEALANT_VERSION      "1.0.2.26"
 #define SEALANT_IOCTL_MAGIC  0x5E
 
 /* ─────────────────────────────────────────
    LIMITS
 ───────────────────────────────────────── */
+
 #define SEALANT_MAX_WHISKERS    10000
 #define SEALANT_MAX_PUPS        65536
 #define SEALANT_IFACE_LEN       16
 #define SEALANT_NAME_LEN        32
 #define SEALANT_LOG_PREFIX_LEN  64
+
+#define SEAL_FAMILY_BOTH        0
+#define SEAL_FAMILY_V4          1
+#define SEAL_FAMILY_V6          2
+
+#define SEAL_VERB_OFF           0
+#define SEAL_VERB_MATCH         1
+#define SEAL_VERB_FULL          2
 
 /* ─────────────────────────────────────────
    PODS (tables)
@@ -110,6 +119,34 @@ struct sealant_rate_state {
 };
 
 /* ─────────────────────────────────────────
+   INTERN
+───────────────────────────────────────── */
+typedef enum {
+    INTERN_INFO  = 0,
+    INTERN_WARN  = 1,
+    INTERN_ERROR = 2,
+} sealant_intern_severity;
+
+typedef enum {
+    SUBSYS_MODULE  = 0,
+    SUBSYS_RULES   = 1,
+    SUBSYS_TIDE    = 2,
+    SUBSYS_CT      = 3,
+    SUBSYS_RATE    = 4,
+    SUBSYS_NAT     = 5,
+    SUBSYS_WHISKER = 6,
+} sealant_intern_subsys;
+
+struct sealant_intern_entry {
+    uint64_t    timestamp;
+    uint8_t     severity;
+    uint8_t     subsystem;
+    uint8_t     valid;
+    uint8_t     _pad;
+    char        msg[96];
+};
+
+/* ─────────────────────────────────────────
    WHISKER (rule)
 ───────────────────────────────────────── */
 struct sealant_whisker {
@@ -150,7 +187,7 @@ struct sealant_whisker {
     char        iface_out[SEALANT_IFACE_LEN];
     uint8_t     negate_iface_in;
     uint8_t     negate_iface_out;
-    uint8_t     ipv4_only;
+    uint8_t     ip_family;
 
     /* connection state bitmask */
     uint8_t     molt_mask;
@@ -247,6 +284,8 @@ struct sealant_stats {
 #define SEALANT_IOC_LOAD_RULES    _IO (SEALANT_IOCTL_MAGIC, 10)
 #define SEALANT_IOC_FLUSH_LOG     _IO (SEALANT_IOCTL_MAGIC, 11)
 #define SEALANT_IOC_GET_STATS     _IOR(SEALANT_IOCTL_MAGIC, 12, struct sealant_stats)
+#define SEALANT_IOC_SET_VERBOSITY _IOW(SEALANT_IOCTL_MAGIC, 13, uint8_t)
+#define SEALANT_IOC_FLUSH_INTERN  _IO (SEALANT_IOCTL_MAGIC, 14)
 
 /* ─────────────────────────────────────────
    KERNEL-ONLY APIs
@@ -273,6 +312,14 @@ void sealant_log_packet(struct sk_buff *skb,
                          uint16_t src_port, uint16_t dst_port,
                          uint8_t proto);
 void sealant_log_flush(void);
+
+/* internals */
+int  sealant_intern_init(void);
+void sealant_intern_exit(void);
+void sealant_intern_write(uint8_t severity, uint8_t subsystem,
+                           const char *fmt, ...);
+void sealant_intern_flush(void);
+extern uint8_t sealant_verbosity;
 
 /* rules */
 int  sealant_rules_init(void);
@@ -315,6 +362,8 @@ int  sealant_comm_save(void);
 int  sealant_comm_load(void);
 int  sealant_comm_get_stats(struct sealant_stats *stats);
 int  sealant_comm_flush_log(void);
+int  sealant_comm_set_verbosity(uint8_t level);
+int  sealant_comm_flush_intern(void);
 
 #endif /* !__KERNEL__ */
 

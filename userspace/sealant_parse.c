@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "../include/sealant.h"
 
@@ -289,6 +290,13 @@ static uint8_t parse_tide_days(const char *s)
     return mask;
 }
 
+static int get_utc_offset_minutes(void)
+{
+    time_t      t = time(NULL);
+    struct tm *lt = localtime(&t);
+    return (int)(lt->tm_gmtoff / 60);
+}
+
 static int parse_tide(const char *s, struct sealant_whisker *w)
 {
     char  buf[64];
@@ -319,6 +327,19 @@ static int parse_tide(const char *s, struct sealant_whisker *w)
         return -1;
     if (parse_tide_time(dash + 1,  &w->tide_hour_end,   &w->tide_min_end)   < 0)
         return -1;
+
+    int offset = get_utc_offset_minutes();
+
+    int start_utc = (w->tide_hour_start * 60 + w->tide_min_start) - offset;
+    int end_utc   = (w->tide_hour_end * 60 + w->tide_min_end) - offset;
+
+    start_utc = ((start_utc % 1440) + 1440) % 1440;
+    end_utc   = ((end_utc % 1440) + 1440) % 1440;
+
+    w->tide_hour_start = (uint8_t)(start_utc / 60);
+    w->tide_min_start  = (uint8_t)(start_utc % 60);
+    w->tide_hour_end   = (uint8_t)(end_utc / 60);
+    w->tide_min_end    = (uint8_t)(end_utc % 60);
 
     w->tide_enabled = 1;
     return 0;
@@ -459,12 +480,12 @@ int parse_whisker(int argc, char **argv, struct sealant_whisker *w)
         /* IPv6 flag */
         else if (strcmp(argv[i], "--ipv6") == 0 ||
                  strcmp(argv[i], "-6") == 0)
-            w->ipv6 = 1;
+            w->ip_family = SEAL_FAMILY_V6;
 
         /* IPv4 only */
         else if (strcmp(argv[i], "--ipv4") == 0 ||
                  strcmp(argv[i], "-4") == 0)
-            w->ipv4_only = 1;
+            w->ip_family = SEAL_FAMILY_V4;
 
         /* log prefix */
         else if (strcmp(argv[i], "--log-prefix") == 0 && i+1 < argc)
@@ -578,6 +599,22 @@ void print_whisker_row(struct sealant_whisker *w)
 
     char tide_buf[48] = "-";
     if (w->tide_enabled) {
+        int offset = get_utc_offset_minutes();
+
+        int start_local = (w->tide_hour_start * 60 + w->tide_min_start) + offset;
+        int end_local   = (w->tide_hour_end   * 60 + w->tide_min_end)   + offset;
+
+        start_local = ((start_local % 1440) + 1440) % 1440;
+        end_local   = ((end_local   % 1440) + 1440) % 1440;
+
+        int sh = start_local / 60, sm = start_local % 60;
+        int eh = end_local   / 60, em = end_local   % 60;
+
+        const char *sa = sh >= 12 ? "p" : "a";
+        const char *ea = eh >= 12 ? "p" : "a";
+        if (sh > 12) sh -= 12; else if (sh == 0) sh = 12;
+        if (eh > 12) eh -= 12; else if (eh == 0) eh = 12;
+
         const char *day_names[] = {"M","T","W","TH","F","S","SU"};
         char days[24] = {0};
         int d, first = 1;
@@ -588,15 +625,13 @@ void print_whisker_row(struct sealant_whisker *w)
                 first = 0;
             }
         }
-        int sh = w->tide_hour_start, eh = w->tide_hour_end;
-        const char *sa = sh >= 12 ? "p" : "a";
-        const char *ea = eh >= 12 ? "p" : "a";
-        if (sh >= 12) sh -= 12;
-        if (sh == 0) sh  = 12;
-        if (eh >= 12) eh -= 12;
-        if (eh == 0) eh  = 12;
-        snprintf(tide_buf, sizeof(tide_buf), "%s %d%s-%d%s",
-            days, sh, sa, eh, ea);
+
+        if (sm || em)
+            snprintf(tide_buf, sizeof(tide_buf), "%s %d:%02d%s-%d:%02d%s",
+                     days, sh, sm, sa, eh, em, ea);
+        else
+            snprintf(tide_buf, sizeof(tide_buf), "%s %d%s-%d%s",
+                     days, sh, sa, eh, ea);
     }
 
     printf("%-4u %-24s %-12s %-20s %-8s %-16s %-16s %-16s %-8s %-10lu %-10lu %s\n",

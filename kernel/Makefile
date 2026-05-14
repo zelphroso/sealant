@@ -1,6 +1,6 @@
 obj-m += sealant.o
 
-sealant-objs := sealant_main.o sealant_ct.o sealant_log.o sealant_rules.o sealant_nat.o
+sealant-objs := sealant_main.o sealant_ct.o sealant_log.o sealant_rules.o sealant_nat.o sealant_intern.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)

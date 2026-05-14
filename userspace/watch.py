@@ -7,15 +7,17 @@
 import curses
 import os
 import sys
+import datetime
 
 # ─────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────
 OBSERVE_PATH = "/proc/sealant/observe"
 LOG_PATH     = "/proc/sealant/log"
+INTERN_PATH  = "/proc/sealant/internals"
 REFRESH_MS   = 1000
 
-VERSION = "1.0.2.26-devvend"
+VERSION = "1.0.2.26"
 
 # ─────────────────────────────────────────
 # DATA READERS
@@ -51,7 +53,6 @@ def read_observe():
                     "tide_min_start":   int(parts[17]) if len(parts) > 17 else 0,
                     "tide_hour_end":    int(parts[18]) if len(parts) > 18 else 0,
                     "tide_min_end":     int(parts[19]) if len(parts) > 19 else 0,
-                    "tide_active":      int(parts[20]) if len(parts) > 20 else 1,
                 }
                 rules.append(rule)
             except ValueError:
@@ -88,6 +89,32 @@ def read_log():
         pass
     return entries[-50:]
 
+def read_internals():
+    entries = []
+    try:
+        with open(INTERN_PATH, "r") as f:
+            lines = f.readlines()
+        # skip verbosity header (2 lines) + blank line + column header
+        for line in lines[4:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            if line.startswith("#"):
+                continue
+            try:
+                entry = {
+                    "timestamp": parts[0],
+                    "severity":  parts[1],
+                    "subsystem": parts[2],
+                    "msg":       parts[3].strip(),
+                }
+                entries.append(entry)
+            except (ValueError, IndexError):
+                continue
+    except (FileNotFoundError, PermissionError):
+        pass
+    return entries[-100:]
+
 # ─────────────────────────────────────────
 # TRANSLATION
 # ─────────────────────────────────────────
@@ -123,21 +150,51 @@ PROTO_STR = {
 
 DAY_NAMES = ["M", "T", "W", "TH", "F", "S", "SU"]
 
+def tide_is_active(rule):
+    if not rule.get("tide_enabled"):
+        return True
+    now = datetime.datetime.utcnow()
+    wday = (now.weekday() + 1) % 7
+    now_mins = now.hour * 60 + now.minute
+    days_mask = rule["tide_days"]
+    rule_start = rule["tide_hour_start"] * 60 + rule["tide_min_start"]
+    rule_end = rule["tide_hour_end"] * 60 + rule["tide_min_end"]
+
+    if rule_start < rule_end:
+        if not (days_mask & (1 << wday)):
+            return False
+        return rule_start <= now_mins < rule_end
+    else:
+        prev_wday = (wday - 1) % 7
+        today_active = bool(days_mask & (1 << wday)) and now_mins >= rule_start
+        yesterday_active = bool(days_mask & (1 << prev_wday)) and now_mins < rule_end
+        return today_active or yesterday_active
+
 def tide_str(rule):
     if not rule.get("tide_enabled"):
         return "-"
 
+    import time as _time
+    offset_mins = -(_time.timezone if not _time.daylight else _time.altzone) // 60
+
     days_mask = rule["tide_days"]
     days = ",".join(d for i, d in enumerate(DAY_NAMES) if days_mask & (1 << i))
+
+    def to_local(h, m):
+        total = ((h * 60 + m) + offset_mins) % 1440
+        return total // 60, total % 60
 
     def fmt_hour(h, m):
         suffix = "p" if h >= 12 else "a"
         h12 = h % 12 or 12
         return f"{h12}:{m:02d}{suffix}" if m else f"{h12}{suffix}"
 
-    start = fmt_hour(rule["tide_hour_start"], rule["tide_min_start"])
-    end = fmt_hour(rule["tide_hour_end"], rule["tide_min_end"])
-    state = "[HIGH TIDE]" if rule.get("tide_active") else "[LOW TIDE]"
+    sh, sm = to_local(rule["tide_hour_start"], rule["tide_min_start"])
+    eh, em = to_local(rule["tide_hour_end"],   rule["tide_min_end"])
+
+    start = fmt_hour(sh, sm)
+    end   = fmt_hour(eh, em)
+    state = "[HIGH TIDE]" if tide_is_active(rule) else "[LOW TIDE]"
     return f"{state} {days} {start}-{end}"
 
 def floe_str(n):
@@ -170,6 +227,8 @@ COLOR_BLEAT    = 5
 COLOR_DIM      = 6
 COLOR_TITLE    = 7
 COLOR_SELECTED = 8
+COLOR_TIDE     = 9
+COLOR_RELOAD   = 10
 
 def init_colors():
     curses.start_color()
@@ -182,6 +241,8 @@ def init_colors():
     curses.init_pair(COLOR_DIM,      curses.COLOR_WHITE,  -1)
     curses.init_pair(COLOR_TITLE,    curses.COLOR_WHITE,  -1)
     curses.init_pair(COLOR_SELECTED, curses.COLOR_BLACK,  curses.COLOR_CYAN)
+    curses.init_pair(COLOR_TIDE,     curses.COLOR_CYAN,   -1)
+    curses.init_pair(COLOR_RELOAD,   curses.COLOR_YELLOW, -1)
 
 def action_color(n):
     return {
@@ -191,10 +252,17 @@ def action_color(n):
         3: COLOR_BLEAT,
     }.get(n, COLOR_DIM)
 
+def severity_color(sev):
+    return {
+        "INFO":  COLOR_DIM,
+        "WARN":  COLOR_RELOAD,
+        "ERROR": COLOR_DIVE,
+    }.get(sev, COLOR_DIM)
+
 # ─────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────
-TABS = ["Rules", "Log", "Status"]
+TABS = ["Rules", "Log", "Internals", "Status"]
 
 # ─────────────────────────────────────────
 # DRAW HELPERS
@@ -230,7 +298,7 @@ def draw_title(win, tab, show_ipv6=False):
         tab_x += len(label) + 1
 
     ipv6_state = "ON" if show_ipv6 else "OFF"
-    help_str = f" [1]Rules [2]Log [3]Status [6]IPv6:{ipv6_state} [q]Quit "
+    help_str = f" [1]Rules [2]Log [3]Internals [4]Status [6]IPv6:{ipv6_state} [q]Quit "
     safe_addstr(win, 0, max_x - len(help_str) - 1, help_str,
                 curses.color_pair(COLOR_DIM))
 
@@ -336,6 +404,41 @@ def draw_log(win, entries, scroll):
         row += 1
 
 # ─────────────────────────────────────────
+# INTERNALS TAB
+# ─────────────────────────────────────────
+def draw_internals(win, entries, scroll):
+    max_y, max_x = win.getmaxyx()
+
+    header = f"{'TIMESTAMP':<14} {'SEV':<8} {'SUBSYS':<10} {'MESSAGE'}"
+    safe_addstr(win, 2, 0, header[:max_x - 1],
+                curses.color_pair(COLOR_HEADER))
+
+    draw_separator(win, 3)
+
+    if not entries:
+        safe_addstr(win, 5, 2, "no internals entries",
+                    curses.color_pair(COLOR_DIM) | curses.A_ITALIC)
+        safe_addstr(win, 6, 2, "set verbosity: sealant verb 1  (match/miss)  or  sealant verb 2  (full)",
+                    curses.color_pair(COLOR_DIM))
+        return
+
+    row = 4
+    for e in entries[scroll:]:
+        if row >= max_y - 2:
+            break
+        line = (f"{e['timestamp']:<14} {e['severity']:<8} "
+            f"{e['subsystem']:<10} {e['msg']}")
+        safe_addstr(win, row, 0, line[:max_x - 1],
+            curses.color_pair(severity_color(e["severity"])))
+        row += 1
+
+    total = len(entries)
+    if total > max_y - 6:
+        safe_addstr(win, max_y - 2, max_x - 20,
+                    f" {scroll + 1}-{min(scroll + max_y - 6, total)}/{total} ",
+                    curses.color_pair(COLOR_DIM))
+
+# ─────────────────────────────────────────
 # STATUS TAB
 # ─────────────────────────────────────────
 def draw_status(win, rules, entries):
@@ -396,10 +499,12 @@ def main(stdscr):
     show_ipv6 = False
     rules     = []
     entries   = []
+    internals = []
 
     while True:
         rules   = read_observe()
         entries = read_log()
+        internals = read_internals()
 
         stdscr.erase()
         draw_title(stdscr, tab, show_ipv6)
@@ -409,6 +514,8 @@ def main(stdscr):
         elif tab == 1:
             draw_log(stdscr, entries, scroll)
         elif tab == 2:
+            draw_internals(stdscr, internals, scroll)
+        elif tab == 3:
             draw_status(stdscr, rules, entries)
 
         max_y, max_x = stdscr.getmaxyx()
@@ -430,6 +537,9 @@ def main(stdscr):
             scroll = 0
         elif key == ord('3'):
             tab = 2
+            scroll = 0
+        elif key == ord('4'):
+            tab = 3
             scroll = 0
         elif key == ord('6'):
             show_ipv6 = not show_ipv6

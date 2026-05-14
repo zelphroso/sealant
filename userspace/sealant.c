@@ -66,12 +66,12 @@ static void usage(void)
     printf("  sealant flush   -f <floe|ALL>\n");
     printf("  sealant policy  -f <floe> -j <action>\n\n");
 
-    printf("geo-ip:\n");
-    printf("  sealant geo block <CC[,CC,...]> [-f <floe>]\n");
-    printf("  sealant geo allow <CC[,CC,...]> [-f <floe>]\n");
+    printf("geo-ip (COMING SOON)\n");
+    printf("  sealant geo block\n");
+    printf("  sealant geo allow\n");
     printf("  sealant geo status\n");
     printf("  sealant geo flush\n");
-    printf("  sealant geo build <rir_file ...>\n");
+    printf("  sealant geo build\n");
     printf("  sealant geo update\n\n");
 
     printf("persistence:\n");
@@ -83,7 +83,9 @@ static void usage(void)
     printf("  sealant status\n");
     printf("  sealant log\n");
     printf("  sealant flush-log\n");
-    printf("  sealant watch\n\n");
+    printf("  sealant watch\n");
+    printf("  sealant verb <0|1|2>     (0=off 1=match/miss 2=full)\n");
+    printf("  sealant flush-intern\n\n");
 
     printf("migration:\n");
     printf("  sealant migrate   [--apply] [--ipv6] [--file <path>]\n\n");
@@ -334,6 +336,33 @@ static int cmd_log(void)
     return 0;
 }
 
+static int cmd_verb(int argc, char **argv)
+{
+    if (argc < 1) {
+        fprintf(stderr, "sealant: verb requires a level: 0, 1, or 2\n");
+        fprintf(stderr, "sealant: 0=off, 1=match/miss, 2=full\n");
+        return 1;
+    }
+
+    int level = atoi(argv[0]);
+    if (level < 0 || level > 2) {
+        fprintf(stderr, "sealant: verbosity level must be 0, 1, or 2\n");
+        return 1;
+    }
+
+    if (sealant_comm_set_verbosity((uint8_t)level) < 0)
+        return 1;
+
+    const char *labels[] = { "off", "match/miss", "full" };
+    printf("sealant: verbosity set to %d (%s)\n", level, labels[level]);
+    return 0;
+}
+
+static int cmd_flush_intern(void)
+{
+    return sealant_comm_flush_intern();
+}
+
 /* ─────────────────────────────────────────
    MAIN — subcommand dispatch
 ───────────────────────────────────────── */
@@ -375,12 +404,13 @@ int main(int argc, char **argv)
         return cmd_log();
     else if (strcmp(argv[1], "flush-log") == 0)
         return cmd_flush_log();
+    else if (strcmp(argv[1], "verb") == 0)
+        return cmd_verb(argc - 2, argv + 2);
+    else if (strcmp(argv[1], "flush-intern") == 0)
+        return cmd_flush_intern();
     else if (strcmp(argv[1], "watch") == 0) {
         execl("/usr/bin/python3", "python3",
                 "/usr/local/share/sealant/watch.py", NULL);
-            /* fallback path */
-        execl("/usr/bin/python3", "python3",
-                "/mnt/projects/sealant-1.0.0.25/userspace/watch.py", NULL);
         fprintf(stderr, "sealant: python3 not found\n");
         return 1;
     }

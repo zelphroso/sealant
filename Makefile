@@ -3,7 +3,7 @@
 # ─────────────────────────────────────────
 KDIR    := /lib/modules/$(shell uname -r)/build
 PWD     := $(shell pwd)
-VERSION := 1.0.2.26-beta
+VERSION := 1.0.2.26
 .PHONY: all clean install uninstall kernel userspace
 all: kernel userspace
 kernel:

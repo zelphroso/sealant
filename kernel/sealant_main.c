@@ -58,7 +58,7 @@ uint32_t			    whisker_count = 0;
 DEFINE_SPINLOCK(whisker_lock);
 static struct sealant_rate_state rate_state[SEALANT_MAX_WHISKERS];
 
-static uint8_t      tide_active[SEALANT_MAX_WHISKERS];
+uint8_t                 tide_active[SEALANT_MAX_WHISKERS];
 static struct timer_list tide_timer;
 
 static void tide_update(struct timer_list *t)
@@ -76,6 +76,7 @@ static void tide_update(struct timer_list *t)
     now_mins = tm.tm_hour * 60 + tm.tm_min;
 
     int wday_bit = (tm.tm_wday == 0) ? 6 : (tm.tm_wday - 1);
+    int prev_wday_bit = (wday_bit == 0) ? 6 : (wday_bit - 1);
     spin_lock_irqsave(&whisker_lock, flags);
     for (i = 0; i < whisker_count; i++) {
         struct sealant_whisker *w = &whisker_table[i];
@@ -89,18 +90,37 @@ static void tide_update(struct timer_list *t)
         }
         rule_start = w->tide_hour_start * 60 + w->tide_min_start;
         rule_end   = w->tide_hour_end * 60 + w->tide_min_end;
-        tide_active[i] = (now_mins >= rule_start && now_mins < rule_end) ? 1 : 0;
+
+        if (rule_start < rule_end) {
+            if (w->tide_days & (1 << wday_bit))
+                tide_active[i] = (now_mins >= rule_start && now_mins < rule_end) ? 1 : 0;
+            else
+                tide_active[i] = 0;
+        } else {
+            uint8_t today_after_start = (w->tide_days & (1 << wday_bit)) && (now_mins >= rule_start);
+            uint8_t yesterday_before_end = (w->tide_days & (1 << prev_wday_bit)) && (now_mins < rule_end);
+            tide_active[i] = (today_after_start || yesterday_before_end) ? 1 : 0;
+        }
     }
     spin_unlock_irqrestore(&whisker_lock, flags);
     mod_timer(&tide_timer, jiffies + 60 * HZ);
+
+    sealant_intern_write(INTERN_INFO, SUBSYS_TIDE,
+        "tide tick complete - %u rules evaluated", whisker_count);
 }
 
 static struct delayed_work rules_load_work;
 
 static void rules_load_worker(struct work_struct *work)
 {
-	sealant_rules_load();
-	printk(KERN_INFO "sealant: rules loaded from delayed worker\n");
+	int ret = sealant_rules_load();
+	if (ret)
+		sealant_intern_write(INTERN_ERROR, SUBSYS_RULES,
+		    "delayed rules load failed (%d)", ret);
+	else
+		sealant_intern_write(INTERN_INFO, SUBSYS_RULES,
+		    "rules loaded from delayed worker (%u whiskers)",
+		    whisker_count);
 }
 
 /* ─────────────────────────────────────────
@@ -347,30 +367,60 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 	struct ipv6hdr		*ip6h;
 	struct tcphdr		*tcph;
 	struct udphdr		*udph;
+
+	/* temp */
+	int offset;
+	__be16 frag_off;
+	uint8_t nexthdr;
+
 	uint16_t		src_port = 0, dst_port = 0;
 	uint8_t			proto;
 	uint32_t		i;
 	unsigned long	flags;
 
+	/* also temp */
+
+	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+	    return NF_ACCEPT;
+
 	ip6h = ipv6_hdr(skb);
 	if (!ip6h)
 		return NF_ACCEPT;
 
-	proto = ip6h->nexthdr;
+	nexthdr = ip6h->nexthdr;
+
+	offset = ipv6_skip_exthdr(skb,
+	    sizeof(struct ipv6hdr),
+		&nexthdr,
+		&frag_off);
+
+	if (offset < 0)
+	    return NF_ACCEPT;
+
+	proto = nexthdr;
+
+	uint8_t pkt_molt = sealant_ct_track(skb, proto,
+	    0, 0, src_port, dst_port);
 
 	if (proto == IPPROTO_TCP) {
-		tcph = tcp_hdr(skb);
-		if (tcph) {
-			src_port = ntohs(tcph->source);
-			dst_port = ntohs(tcph->dest);
-		}
+	    if (!pskb_may_pull(skb, offset + sizeof(struct tcphdr)))
+			return NF_ACCEPT;
+
+		tcph = (struct tcphdr *)(skb_network_header(skb) + offset);
+		src_port = ntohs(tcph->source);
+		dst_port = ntohs(tcph->dest);
+
 	} else if (proto == IPPROTO_UDP) {
-		udph = udp_hdr(skb);
-		if (udph) {
-			src_port = ntohs(udph->source);
-			dst_port = ntohs(udph->dest);
-		}
+	    if (!pskb_may_pull(skb, offset + sizeof(struct udphdr)))
+			return NF_ACCEPT;
+
+		udph = (struct udphdr *)(skb_network_header(skb) + offset);
+
+		src_port = ntohs(udph->source);
+		dst_port = ntohs(udph->dest);
 	}
+
+	/* also temp end */
 
 	spin_lock_irqsave(&whisker_lock, flags);
 
@@ -386,8 +436,16 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 		if (!w->ipv6)
 			continue;
 
+		if (!tide_active[i])
+		    continue;
+
 		if (w->protocol != PROTO_ANY && w->protocol != proto)
 			continue;
+
+		if (w->molt_mask != 0) {
+		    if (!(w->molt_mask & pkt_molt))
+				continue;
+		}
 
 		if (!ipv6_addr_any((struct in6_addr *)w->src_ip6)) {
 			struct in6_addr masked_src, masked_rule;
@@ -429,12 +487,12 @@ static unsigned int evaluate_packet_ipv6(struct sk_buff *skb,
 		/* interface match */
 		if (w->iface_in[0] != '\0' && state->in) {
             int match = (strncmp(w->iface_in, state->in->name, SEALANT_IFACE_LEN) == 0);
-            if (match == w->negate_iface_in)
+            if (match == !!w->negate_iface_in)
                 continue;
 		}
 		if (w->iface_out[0] != '\0' && state->out) {
             int match = (strncmp(w->iface_out, state->out->name, SEALANT_IFACE_LEN) == 0);
-            if (match == w->negate_iface_out)
+            if (match == !!w->negate_iface_out)
                 continue;
 		}
 
@@ -567,9 +625,20 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 		spin_lock_irqsave(&whisker_lock, flags);
 		if (whisker_count >= SEALANT_MAX_WHISKERS) {
+			sealant_intern_write(INTERN_ERROR, SUBSYS_WHISKER,
+				"whisker table full (%u/%u), rule rejected",
+				whisker_count, SEALANT_MAX_WHISKERS);
 			spin_unlock_irqrestore(&whisker_lock, flags);
 			return -ENOMEM;
 		}
+		if (whisker_count >= (SEALANT_MAX_WHISKERS * 95) / 100)
+		    sealant_intern_write(INTERN_WARN, SUBSYS_WHISKER,
+				"whisker table at 95%% capacity (%u/%u)",
+				whisker_count, SEALANT_MAX_WHISKERS);
+		else if (whisker_count >= (SEALANT_MAX_WHISKERS * 80) / 100)
+		    sealant_intern_write(INTERN_WARN, SUBSYS_WHISKER,
+				"whisker table at 80%% capacity (%u/%u)",
+				whisker_count, SEALANT_MAX_WHISKERS);
 		/* shadow check */
 		{
 			uint32_t k;
@@ -577,16 +646,19 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 				struct sealant_whisker *existing = &whisker_table[k];
 				if (!existing->enabled) continue;
 				if (existing->floe != w.floe) continue;
-				if (existing->src_ip == 0 &&
-				    existing->dst_ip == 0 &&
-				    existing->dst_port_min == 0 &&
-				    existing->dst_port_max == 0 &&
-				    existing->iface_in[0] == '\0' &&
-				    existing->iface_out[0] == '\0' &&
-				    existing->molt_mask == 0 &&
-				    existing->protocol == PROTO_ANY) {
-					printk(KERN_WARNING "sealant: whisker may be "
-					       "shadowed by rule %u\n", existing->id);
+				if (existing->protocol == PROTO_ANY &&
+					existing->molt_mask == 0 &&
+					existing->dst_port_min == 0 &&
+					existing->dst_port_max == 0 &&
+					existing->iface_in[0] == '\0' &&
+					existing->iface_out[0] == '\0' &&
+					(existing->ipv6 == 0
+					    ? (existing->src_ip == 0 && existing->dst_ip == 0)
+						: (ipv6_addr_any((struct in6_addr *)existing->src_ip6) &&
+						   ipv6_addr_any((struct in6_addr *)existing->dst_ip6)))) {
+					sealant_intern_write(INTERN_WARN, SUBSYS_WHISKER,
+						"whisker %u may be shadowed by rule %u",
+						w.id, existing->id);
 					break;
 				}
 			}
@@ -594,14 +666,24 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 		w.id         = whisker_count;
 		w.hit_count  = 0;
 		w.byte_count = 0;
+
+		if (w.ip_family == SEAL_FAMILY_V6)
+            w.ipv6 = 1;
+        else
+            w.ipv6 = 0;
+
 		whisker_table[whisker_count++] = w;
-		if (!w.ipv6 && !w.ipv4_only && whisker_count < SEALANT_MAX_WHISKERS) {
-			struct sealant_whisker w6 = w;
-			w6.ipv6       = 1;
-			w6.id         = whisker_count;
-			w6.hit_count  = 0;
-			w6.byte_count = 0;
-			whisker_table[whisker_count++] = w6;
+		tide_active[whisker_count - 1] = w.tide_enabled ? 0 : 1;
+
+		/* for dual-stack rules, append a v6 mirror instance */
+		if (w.ip_family == SEAL_FAMILY_BOTH && whisker_count < SEALANT_MAX_WHISKERS) {
+            struct sealant_whisker w6 = w;
+            w6.ipv6       = 1;
+            w6.id         = whisker_count;
+            w6.hit_count  = 0;
+            w6.byte_count = 0;
+            whisker_table[whisker_count++] = w6;
+            tide_active[whisker_count - 1] = w.tide_enabled ? 0 : 1;
 		}
 		spin_unlock_irqrestore(&whisker_lock, flags);
 		break;
@@ -623,10 +705,14 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 		    whisker_table[id + 1].dst_port_max == whisker_table[id].dst_port_max) {
 			memmove(&whisker_table[id], &whisker_table[id + 2],
 				(whisker_count - id - 2) * sizeof(struct sealant_whisker));
+			memmove(&tide_active[id], &tide_active[id + 2],
+			    (whisker_count - id - 2) * sizeof(uint8_t));
 			whisker_count -= 2;
 		} else {
 			memmove(&whisker_table[id], &whisker_table[id + 1],
 				(whisker_count - id - 1) * sizeof(struct sealant_whisker));
+			memmove(&tide_active[id], &tide_active[id + 1],
+			    (whisker_count - id - 1) * sizeof(uint8_t));
 			whisker_count--;
 		}
 		{
@@ -638,21 +724,24 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 		break;
 
 	case SEALANT_IOC_FLUSH_FLOE:
-		if (copy_from_user(&payload, (void __user *)arg, sizeof(payload)))
-			return -EFAULT;
-		spin_lock_irqsave(&whisker_lock, flags);
-		{
-			uint32_t i = 0, j = 0;
-			for (i = 0; i < whisker_count; i++) {
-				if (whisker_table[i].floe != payload)
-					whisker_table[j++] = whisker_table[i];
-			}
-			whisker_count = j;
-			for (j = 0; j < whisker_count; j++)
-				whisker_table[j].id = j;
-		}
-		spin_unlock_irqrestore(&whisker_lock, flags);
-		break;
+        if (copy_from_user(&payload, (void __user *)arg, sizeof(payload)))
+            return -EFAULT;
+        spin_lock_irqsave(&whisker_lock, flags);
+        {
+            uint32_t i = 0, j = 0;
+            for (i = 0; i < whisker_count; i++) {
+                if (whisker_table[i].floe != payload) {
+                    whisker_table[j] = whisker_table[i];
+                    tide_active[j]   = tide_active[i];
+                    j++;
+                }
+            }
+            whisker_count = j;
+            for (j = 0; j < whisker_count; j++)
+                whisker_table[j].id = j;
+        }
+        spin_unlock_irqrestore(&whisker_lock, flags);
+        break;
 
 	case SEALANT_IOC_SET_POLICY:
 		if (copy_from_user(&payload, (void __user *)arg, sizeof(payload)))
@@ -678,6 +767,18 @@ static long sealant_ioctl(struct file *file, unsigned int cmd,
 
 	case SEALANT_IOC_FLUSH_LOG:
 		sealant_log_flush();
+		break;
+
+	case SEALANT_IOC_SET_VERBOSITY:
+	    if (copy_from_user(&payload, (void __user *)arg, sizeof(payload)))
+			return -EFAULT;
+		if (payload > SEAL_VERB_FULL)
+		    return -EINVAL;
+		sealant_verbosity = payload;
+		break;
+
+	case SEALANT_IOC_FLUSH_INTERN:
+	    sealant_intern_flush();
 		break;
 
 	case SEALANT_IOC_GET_STATS:
@@ -725,16 +826,16 @@ static int sealant_proc_show(struct seq_file *m, void *v)
 	uint32_t      i;
 	unsigned long flags;
 
-	seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-6s %-6s %-10s %-10s %-4s %-4s %-4s %-4s %-3s %-3s %-3s %-3s %-3s %-4s\n",
+	seq_printf(m, "%-4s %-32s %-6s %-8s %-6s %-16s %-16s %-6s %-6s %-10s %-10s %-4s %-4s %-4s %-4s %-3s %-3s %-3s %-3s %-3s\n",
            "ID", "NAME", "FLOE", "ACTION", "PROTO",
            "IFACE_IN", "IFACE_OUT", "DPORT_MIN", "DPORT_MAX",
            "HITS", "BYTES", "IP6", "N_IN", "N_OUT",
-           "TIDE", "TDS", "THS", "TMS", "THE", "TME", "ACT");
+           "TIDE", "TDS", "THS", "TMS", "THE", "TME");
 
 	spin_lock_irqsave(&whisker_lock, flags);
 	for (i = 0; i < whisker_count; i++) {
 		struct sealant_whisker *w = &whisker_table[i];
-		seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-6u %-6u %-10llu %-10llu %-4u %-4u %-4u %-4u %-3u %-3u %-3u %-3u %-3u %-4u\n",
+		seq_printf(m, "%-4u %-32s %-6u %-8u %-6u %-16s %-16s %-6u %-6u %-10llu %-10llu %-4u %-4u %-4u %-4u %-3u %-3u %-3u %-3u %-3u\n",
 			    w->id,
 				w->name[0] ? w->name : "(unnamed)",
 				w->floe,
@@ -751,8 +852,7 @@ static int sealant_proc_show(struct seq_file *m, void *v)
 				w->tide_enabled,
 				w->tide_days,
 				w->tide_hour_start, w->tide_min_start,
-				w->tide_hour_end,   w->tide_min_end,
-                tide_active[i]);
+				w->tide_hour_end,   w->tide_min_end);
 	}
 	spin_unlock_irqrestore(&whisker_lock, flags);
 
@@ -807,9 +907,19 @@ static int __init sealant_init(void)
 		return ret;
 	}
 
+	ret = sealant_intern_init();
+	if (ret) {
+	    printk(KERN_ERR "sealant: internals init failed (%d)\n", ret);
+		sealant_log_exit();
+		misc_deregister(&sealant_dev);
+		sealant_ct_exit();
+		return ret;
+	}
+
 	ret = sealant_rules_init();
 	if (ret) {
 		printk(KERN_ERR "sealant: rules init failed (%d)\n", ret);
+		sealant_intern_exit();
 		sealant_log_exit();
 		misc_deregister(&sealant_dev);
 		sealant_ct_exit();
@@ -849,6 +959,10 @@ static int __init sealant_init(void)
 	printk(KERN_INFO "sealant: loaded - %d hooks registered\n",
 	       (int)ARRAY_SIZE(sealant_hooks));
 
+	sealant_intern_write(INTERN_INFO, SUBSYS_MODULE,
+	    "sealant v%s loaded - %d hooks active",
+		SEALANT_VERSION, (int)ARRAY_SIZE(sealant_hooks));
+
 	return 0;
 }
 
@@ -858,7 +972,8 @@ static int __init sealant_init(void)
 
 static void __exit sealant_exit(void)
 {
-	printk(KERN_INFO "sealant: unloading\n");
+	sealant_intern_write(INTERN_INFO, SUBSYS_MODULE,
+	    "sealant unloading");
 
 	cancel_delayed_work_sync(&rules_load_work);
 	del_timer_sync(&tide_timer);
@@ -873,6 +988,7 @@ static void __exit sealant_exit(void)
 
 	sealant_ct_exit();
 	sealant_log_exit();
+	sealant_intern_exit();
 	sealant_rules_exit();
 	sealant_nat_exit();
 

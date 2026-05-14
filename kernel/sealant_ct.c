@@ -46,7 +46,7 @@
 ───────────────────────────────────────── */
 
 #define PUP_HASH_BITS	16
-#define PUP_HASH_SIZE 	(1 << PUP_HASH_BITS)
+#define PUP_HASH_SIZE	(1 << PUP_HASH_BITS)
 #define PUP_HASH_MASK	(PUP_HASH_SIZE - 1)
 
 struct pup_entry {
@@ -61,6 +61,16 @@ static DEFINE_SPINLOCK(ct_lock);
 
 /* garb */
 static struct timer_list	gc_timer;
+
+/* ─────────────────────────────────────────
+   CAPACITY WARNING THRESHOLDS
+───────────────────────────────────────── */
+
+#define PUP_WARN_80   ((SEALANT_MAX_PUPS * 80) / 100)
+#define PUP_WARN_95   ((SEALANT_MAX_PUPS * 95) / 100)
+
+static uint8_t ct_warned_95 = 0;
+static uint8_t ct_warned_80 = 0;
 
 /* ─────────────────────────────────────────
    HASH FUNCTION
@@ -116,7 +126,7 @@ static struct pup_entry *pup_lookup_reply(uint32_t src_ip, uint32_t dst_ip,
 /* ─────────────────────────────────────────
    GET TIMEOUT
    returns the correct timeout for a pup
-   (is based on protocol and state)
+   based on protocol and state
 ───────────────────────────────────────── */
 
 static unsigned long pup_get_timeout(uint8_t proto, uint8_t molt)
@@ -144,12 +154,31 @@ static struct pup_entry *pup_create(uint32_t src_ip, uint32_t dst_ip,
 	struct pup_entry *e;
 	uint32_t	bucket;
 
-	if (pup_count >= SEALANT_MAX_PUPS)
+	if (pup_count >= SEALANT_MAX_PUPS) {
+		sealant_intern_write(INTERN_ERROR, SUBSYS_CT,
+		    "conntrack table full (%u/%u), dropping new flow",
+		    pup_count, SEALANT_MAX_PUPS);
 		return NULL;
+	}
+
+	if (!ct_warned_95 && pup_count >= PUP_WARN_95) {
+		sealant_intern_write(INTERN_WARN, SUBSYS_CT,
+		    "conntrack table at 95%% capacity (%u/%u)",
+		    pup_count, SEALANT_MAX_PUPS);
+		ct_warned_95 = 1;
+	} else if (!ct_warned_80 && pup_count >= PUP_WARN_80) {
+		sealant_intern_write(INTERN_WARN, SUBSYS_CT,
+		    "conntrack table at 80%% capacity (%u/%u)",
+		    pup_count, SEALANT_MAX_PUPS);
+		ct_warned_80 = 1;
+	}
 
 	e = kmalloc(sizeof(*e), GFP_ATOMIC);
-	if (!e)
+	if (!e) {
+		sealant_intern_write(INTERN_ERROR, SUBSYS_CT,
+		    "pup kmalloc failed for new flow");
 		return NULL;
+	}
 
 	memset(e, 0, sizeof(*e));
 
@@ -165,9 +194,8 @@ static struct pup_entry *pup_create(uint32_t src_ip, uint32_t dst_ip,
 
 	bucket = pup_hash(src_ip, dst_ip, src_port, dst_port, proto);
 
-        /* insert at head of bucket chain */
 	e->next			= pup_table[bucket];
-	pup_table[bucket] 	= e;
+	pup_table[bucket]	= e;
 	pup_count++;
 
 	return e;
@@ -198,16 +226,12 @@ static void pup_update(struct pup_entry *e, struct sk_buff *skb,
 		tcph = tcp_hdr(skb);
 		if (tcph) {
 			if (tcph->syn && !tcph->ack) {
-				/* SYN — new connection attempt */
 				e->pup.molt = MOLT_NEW;
 			} else if (tcph->syn && tcph->ack) {
-				/* SYN-ACK — promote to established */
 				e->pup.molt = MOLT_ESTABLISHED;
 			} else if (tcph->ack && !tcph->syn) {
-				/* ACK — connection established */
 				e->pup.molt = MOLT_ESTABLISHED;
 			} else if (tcph->fin || tcph->rst) {
-				/* FIN or RST — connection closing */
 				e->pup.molt = MOLT_INVALID;
 				e->expires  = jiffies + 5 * HZ;
 				return;
@@ -231,6 +255,7 @@ static void pup_gc(struct timer_list *t)
 	struct pup_entry *e, *prev, *next;
 	unsigned long	flags;
 	uint32_t	i;
+	uint32_t	evicted = 0;
 
 	spin_lock_irqsave(&ct_lock, flags);
 
@@ -247,6 +272,7 @@ static void pup_gc(struct timer_list *t)
 					pup_table[i] = next;
 				kfree(e);
 				pup_count--;
+				evicted++;
 			} else {
 				prev = e;
 			}
@@ -254,7 +280,17 @@ static void pup_gc(struct timer_list *t)
 		}
 	}
 
+	if (ct_warned_95 && pup_count < PUP_WARN_95)
+		ct_warned_95 = 0;
+	if (ct_warned_80 && pup_count < PUP_WARN_80)
+		ct_warned_80 = 0;
+
 	spin_unlock_irqrestore(&ct_lock, flags);
+
+	if (evicted > 0)
+		sealant_intern_write(INTERN_INFO, SUBSYS_CT,
+		    "gc evicted %u expired pups, %u remaining",
+		    evicted, pup_count);
 
 	/* piggyback NAT GC */
 	sealant_nat_gc();
@@ -272,7 +308,6 @@ static void pup_gc(struct timer_list *t)
 uint8_t sealant_ct_track(struct sk_buff *skb, uint8_t proto,
 			uint32_t src_ip, uint32_t dst_ip,
 			uint16_t src_port, uint16_t dst_port)
-
 {
 	struct pup_entry *e;
 	unsigned long	flags;
@@ -329,7 +364,9 @@ void sealant_ct_flush(void)
 		pup_table[i] = NULL;
 	}
 
-	pup_count = 0;
+	pup_count    = 0;
+	ct_warned_80 = 0;
+	ct_warned_95 = 0;
 
 	spin_unlock_irqrestore(&ct_lock, flags);
 }
@@ -350,13 +387,16 @@ uint32_t sealant_ct_count(void)
 int sealant_ct_init(void)
 {
 	memset(pup_table, 0, sizeof(pup_table));
-	pup_count = 0;
+	pup_count    = 0;
+	ct_warned_80 = 0;
+	ct_warned_95 = 0;
 
 	timer_setup(&gc_timer, pup_gc, 0);
 	mod_timer(&gc_timer, jiffies + PUP_GC_INTERVAL * HZ);
 
-	printk(KERN_INFO "sealant: conntrack initialized (%u buckets)\n",
-		PUP_HASH_SIZE);
+	sealant_intern_write(INTERN_INFO, SUBSYS_CT,
+	    "conntrack initialized (%u buckets, max %u pups)",
+	    PUP_HASH_SIZE, SEALANT_MAX_PUPS);
 	return 0;
 }
 
@@ -364,5 +404,6 @@ void sealant_ct_exit(void)
 {
 	del_timer_sync(&gc_timer);
 	sealant_ct_flush();
-	printk(KERN_INFO "sealant: conntrack shut down\n");
+	sealant_intern_write(INTERN_INFO, SUBSYS_CT,
+	    "conntrack shut down");
 }

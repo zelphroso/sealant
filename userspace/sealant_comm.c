@@ -245,3 +245,40 @@ int sealant_comm_flush_log(void)
     sealant_comm_close(fd);
     return ret;
 }
+
+/* ─────────────────────────────────────────
+   INTERN
+───────────────────────────────────────── */
+
+int sealant_comm_set_verbosity(uint8_t level)
+{
+    int fd, ret;
+    fd = sealant_comm_open();
+    if (fd < 0) return -1;
+
+    ret = ioctl(fd, SEALANT_IOC_SET_VERBOSITY, &level);
+    if (ret < 0)
+        fprintf(stderr, "sealant: set verbosity failed: %s\n",
+            strerror(errno));
+
+    sealant_comm_close(fd);
+    return ret;
+}
+
+int sealant_comm_flush_intern(void)
+{
+    int fd, ret;
+
+    fd = sealant_comm_open();
+    if (fd < 0) return -1;
+
+    ret = ioctl(fd, SEALANT_IOC_FLUSH_INTERN, 0);
+    if (ret < 0)
+        fprintf(stderr, "sealant: flush internals failed: %s\n",
+            strerror(errno));
+    else
+        printf("sealant: internals cleared\n");
+
+    sealant_comm_close(fd);
+    return ret;
+}
